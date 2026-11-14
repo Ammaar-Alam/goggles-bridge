@@ -10,6 +10,10 @@ Open an [issue](https://github.com/Ammaar-Alam/goggles-bridge/issues) with steps
 
 Fork the repository, create a branch, and open a pull request against `main`. Keep each pull request focused. Describe the problem, your change, and how you checked it.
 
+Please keep in mind general repository hygiene, including ensuring each pull request is small enough to be reviewable. For a new feature or a large change, open an issue first so the high-level approach can be agreed on.
+
+If your change affects streaming, capture, or the app, test it on your goggles. Latency should stay the same or improve. If a change might affect latency, include a before-and-after measurement. For more information, see [Measure video delay](docs/LATENCY.md).
+
 Install the dependencies and run the offline tests from the repository root:
 
 ```powershell
