@@ -196,6 +196,22 @@ class OwnershipTests(unittest.TestCase):
         self.assertEqual(self.records[self.parents[0]+'\\OtherProduct'], {'setting': 'keep'})
         self.assertEqual(self.records[self.parents[1]], {'setting': 'keep'})
 
+    def test_owned_package_removal_prunes_only_empty_umdf_keys(self):
+        service = virtual_driver.UMDF_SERVICE
+        for nonempty in (False, True):
+            with self.subTest(nonempty=nonempty):
+                self.records[virtual_driver.OWNER] = {'PublishedInf': 'oem42.inf'}
+                self.records[virtual_driver.REGISTRY] = {'VDDPATH': str(self.folder)}
+                self.records[service] = {}
+                self.records[service+'\\Parameters'] = {'other': 'keep'} if nonempty else {}
+                self.records[service+'\\State'] = {}
+                with patch.object(virtual_driver, 'system_directory', return_value=self.folder/'System32'):
+                    self.assertEqual(virtual_driver.remove(), 0)
+                self.assertNotIn(service+'\\State', self.records)
+                self.assertEqual(service in self.records, nonempty)
+                if nonempty:
+                    self.assertEqual(self.records[service+'\\Parameters'], {'other': 'keep'})
+
 
 class MaintenanceTests(unittest.TestCase):
     def setUp(self):

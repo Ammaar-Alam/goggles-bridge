@@ -25,6 +25,7 @@ from .elevation import InstallerProcess
 
 REGISTRY = r'SOFTWARE\MikeTheTech\VirtualDisplayDriver'
 OWNER = r'SOFTWARE\G2Bridge\GogglesBridgeDisplay'
+UMDF_SERVICE = r'SOFTWARE\Microsoft\Windows NT\CurrentVersion\WUDF\Services\MttVDD'
 PREVIOUS_OWNER = r'SOFTWARE\G2Bridge\DJIGogglesStreamerDisplay'
 INSTANCE_ID = re.compile(r'ROOT\\GOGGLESBRIDGE\\[0-9a-f]{32}', re.IGNORECASE)
 PREVIOUS_NOTICE = 'This older display installation cannot be verified. Uninstall it with the original app or its Windows uninstall entry, then install again.'
@@ -416,7 +417,12 @@ def remove():
         winreg.DeleteKey(winreg.HKEY_LOCAL_MACHINE, OWNER)
     except FileNotFoundError:
         pass
-    for parent in (OWNER.rsplit('\\', 1)[0], REGISTRY.rsplit('\\', 1)[0]):
+    # Windows removes the UMDF registration values but can leave empty keys.
+    # Never delete values or unknown children belonging to another installation.
+    empty_keys = [OWNER.rsplit('\\', 1)[0], REGISTRY.rsplit('\\', 1)[0]]
+    if published:
+        empty_keys += [UMDF_SERVICE + '\\Parameters', UMDF_SERVICE + '\\State', UMDF_SERVICE]
+    for parent in empty_keys:
         try:
             with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, parent) as key:
                 if winreg.QueryInfoKey(key)[:2] != (0, 0):

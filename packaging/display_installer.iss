@@ -32,6 +32,8 @@ Type: filesandordirs; Name: "{app}\maintenance"
 Type: files; Name: "{app}\vdd_settings.xml"
 Type: files; Name: "{app}\vdd_settings.tmp"
 Type: files; Name: "{app}\display-install.json"
+; Upgrades may inherit a directory created by an older installer.
+Type: dirifempty; Name: "{app}"
 
 [Code]
 #include "protected_runtime.iss"
