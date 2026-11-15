@@ -1,4 +1,4 @@
-"""Build the Windows app folder in dist/ and, when Inno Setup is installed, the installer.
+"""Build the Windows app folder and installers in dist/.
 
 Needs the packages in requirements-app.txt plus PyInstaller. Run from any folder.
 """
@@ -73,7 +73,17 @@ def prepare_vdd():
 
 
 def main():
+    try:
+        from webview import create_window, start
+        import usb.core
+    except ImportError as exc:
+        raise SystemExit('Missing app dependencies. Run this Python with -m pip install -r requirements-app.txt before building.') from exc
+    if not callable(create_window) or not callable(start):
+        raise SystemExit('The webview module is not pywebview. Repair the build environment before building.')
     vdd = prepare_vdd()
+    compiler = shutil.which('iscc') or r'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+    if not Path(compiler).is_file():
+        raise SystemExit('Install Inno Setup 6 and add ISCC.exe to PATH to build the driver component and app.')
     dist, cache = ROOT/'dist', ROOT/'packaging'/'cache'
     app = dist/APP_NAME
     archive = cache/f'{FFMPEG}.zip'
@@ -83,33 +93,32 @@ def main():
         urllib.request.urlretrieve(FFMPEG_URL, archive)
     if sha256(archive) != FFMPEG_SHA256:
         raise SystemExit(f'{archive} does not match the pinned FFmpeg checksum. Delete it and build again')
+    subprocess.run([sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean', '--console',
+                    '--name', 'GogglesBridgeDisplaySetup',
+                    '--distpath', str(dist), '--workpath', str(ROOT/'build/display-setup'),
+                    '--specpath', str(ROOT/'build'), str(ROOT/'scripts/goggles_bridge_display_setup.py')],
+                   check=True, cwd=ROOT)
+    subprocess.run([compiler, f'/DVersion={__version__}', str(ROOT/'packaging'/'display_installer.iss')], check=True)
+    generated = ROOT/'build/app-constants'
+    generated.mkdir(parents=True, exist_ok=True)
+    (generated/'_goggles_driver_build.py').write_text(
+        f'INSTALLER_SHA256 = {sha256(dist/"GogglesBridgeDisplay-Setup.exe")!r}\n', encoding='utf-8')
     subprocess.run([sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean', '--windowed', '--name', APP_NAME,
                     '--icon', str(ROOT/'packaging'/'goggles-bridge.ico'),
                     '--add-data', f"{ROOT/'goggles_bridge'/'app'/'ui'};goggles_bridge/app/ui",
-                    '--add-data', f'{vdd};vendor/vdd',
+                    '--add-data', f'{vdd/"LICENSE.txt"};vendor/vdd',
+                    '--paths', str(generated), '--hidden-import', '_goggles_driver_build',
                     # PyUSB loads its backends by name at run time
                     '--hidden-import', 'usb.backend.libusb0', '--hidden-import', 'usb.backend.libusb1',
                     '--distpath', str(dist), '--workpath', str(ROOT/'build'), '--specpath', str(ROOT/'build'),
                     str(ROOT/'scripts'/'goggles_bridge_app.py')], check=True, cwd=ROOT)
-    subprocess.run([sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean', '--console',
-                    '--name', 'GogglesBridgeDisplaySetup', '--contents-directory', '_display_setup_internal',
-                    '--add-data', f'{vdd};vendor/vdd',
-                    '--distpath', str(dist), '--workpath', str(ROOT/'build/display-setup'),
-                    '--specpath', str(ROOT/'build'), str(ROOT/'scripts/goggles_bridge_display_setup.py')],
-                   check=True, cwd=ROOT)
-    # Keep the helper's Python archive separate; merging onedir internals can
-    # replace the GUI's base_library.zip with a smaller helper-specific archive.
-    shutil.copytree(dist/'GogglesBridgeDisplaySetup', app, dirs_exist_ok=True)
+    shutil.copyfile(dist/'GogglesBridgeDisplay-Setup.exe', app/'GogglesBridgeDisplay-Setup.exe')
     (app/'ffmpeg').mkdir(exist_ok=True)
     with zipfile.ZipFile(archive) as bundle:
         for member, target in ((f'{FFMPEG}/bin/ffmpeg.exe', 'ffmpeg.exe'), (f'{FFMPEG}/LICENSE', 'LICENSE.txt')):
             (app/'ffmpeg'/target).write_bytes(bundle.read(member))
     shutil.copyfile(ROOT/'LICENSE', app/'LICENSE.txt')
     (app/'NOTICES.txt').write_text(NOTICES, encoding='utf-8')
-    compiler = shutil.which('iscc') or r'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
-    if not Path(compiler).is_file():
-        print(f'Built {app}. Install Inno Setup 6 to build the installer')
-        return
     subprocess.run([compiler, f'/DVersion={__version__}', str(ROOT/'packaging'/'installer.iss')], check=True)
     installer = dist/f'GogglesBridge-{__version__}-Setup.exe'
     print(f'Built {installer}\nSHA-256: {sha256(installer)}')

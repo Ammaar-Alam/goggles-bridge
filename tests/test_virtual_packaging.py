@@ -2,7 +2,9 @@
 import hashlib
 import importlib.util
 from pathlib import Path
+import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import zipfile
@@ -15,6 +17,16 @@ spec.loader.exec_module(build)
 
 
 class PackagingTests(unittest.TestCase):
+    def test_missing_or_incomplete_webview_stops_before_building(self):
+        for module in (None, SimpleNamespace(), SimpleNamespace(create_window=None, start=lambda: None)):
+            with self.subTest(module=module), patch.dict(sys.modules, {'webview': module}), \
+                 patch.object(build, 'prepare_vdd') as prepare, \
+                 patch.object(build.subprocess, 'run') as run:
+                with self.assertRaisesRegex(SystemExit, 'dependencies|not pywebview'):
+                    build.main()
+                prepare.assert_not_called()
+                run.assert_not_called()
+
     def test_bad_archive_hash_cannot_replace_existing_driver(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

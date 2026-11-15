@@ -54,6 +54,10 @@ class NAME(C.Structure):
     _fields_ = [('header', HEADER), ('name', W.WCHAR * 32)]
 
 
+class ADAPTER_NAME(C.Structure):
+    _fields_ = [('header', HEADER), ('path', W.WCHAR * 128)]
+
+
 def api():
     user = C.WinDLL('user32', use_last_error=True)
     user.GetDisplayConfigBufferSizes.argtypes = [W.UINT, C.POINTER(W.UINT), C.POINTER(W.UINT)]
@@ -96,20 +100,53 @@ def configure(paths, modes, flags):
         raise RuntimeError(f'Windows could not apply the virtual display configuration ({code}).')
 
 
-def active_refresh(device):
-    """Return the active signal's rational rate, not a render-GPU identity."""
+def path_identity(path):
+    """Resolve the display adapter interface to its actual PnP device instance."""
+    from .virtual_driver import GUID, DEVINFO
+    name = ADAPTER_NAME(header=HEADER(type=4, size=C.sizeof(ADAPTER_NAME),
+                                     adapterId=path.targetInfo.adapterId))
+    code = api().DisplayConfigGetDeviceInfo(C.byref(name.header))
+    if code:
+        raise RuntimeError(f'Windows could not identify the display adapter ({code}).')
+    setup = C.WinDLL('setupapi', use_last_error=True)
+    setup.SetupDiCreateDeviceInfoList.argtypes = [C.POINTER(GUID), W.HWND]
+    setup.SetupDiCreateDeviceInfoList.restype = W.HANDLE
+    # SP_DEVICE_INTERFACE_DATA and SP_DEVINFO_DATA share the same ABI layout.
+    setup.SetupDiOpenDeviceInterfaceW.argtypes = [W.HANDLE, W.LPCWSTR, W.DWORD, C.POINTER(DEVINFO)]
+    setup.SetupDiGetDeviceInterfaceDetailW.argtypes = [W.HANDLE, C.POINTER(DEVINFO), C.c_void_p,
+                                                    W.DWORD, C.POINTER(W.DWORD), C.POINTER(DEVINFO)]
+    setup.SetupDiGetDeviceInstanceIdW.argtypes = [W.HANDLE, C.POINTER(DEVINFO), W.LPWSTR,
+                                               W.DWORD, C.POINTER(W.DWORD)]
+    setup.SetupDiDestroyDeviceInfoList.argtypes = [W.HANDLE]
+    handle = setup.SetupDiCreateDeviceInfoList(None, None)
+    if handle in (None, C.c_void_p(-1).value):
+        raise C.WinError(C.get_last_error())
+    try:
+        interface = DEVINFO(cbSize=C.sizeof(DEVINFO))
+        info = DEVINFO(cbSize=C.sizeof(DEVINFO))
+        if not setup.SetupDiOpenDeviceInterfaceW(handle, name.path, 0, C.byref(interface)):
+            raise C.WinError(C.get_last_error())
+        # This documented size-query fills info even though the detail buffer is absent.
+        if not setup.SetupDiGetDeviceInterfaceDetailW(handle, C.byref(interface), None, 0, None, C.byref(info)):
+            if C.get_last_error() != 122:
+                raise C.WinError(C.get_last_error())
+        instance = C.create_unicode_buffer(512)
+        if not setup.SetupDiGetDeviceInstanceIdW(handle, C.byref(info), instance, len(instance), None):
+            raise C.WinError(C.get_last_error())
+        return instance.value.casefold(), path.targetInfo.id
+    finally:
+        setup.SetupDiDestroyDeviceInfoList(handle)
+
+
+def identity(device):
     paths, _ = query()
-    selected = [p for p in paths if p.flags & 1 and source_name(p) == device]
-    rates = {(p.targetInfo.refreshRate.Numerator, p.targetInfo.refreshRate.Denominator)
-             for p in selected if p.targetInfo.refreshRate.Denominator}
-    if len(rates) != 1:
-        return None
-    numerator, denominator = rates.pop()
-    return dict(numerator=numerator, denominator=denominator,
-                hz=numerator / denominator)
+    matches = {path_identity(p) for p in paths if p.targetInfo.targetAvailable and source_name(p) == device}
+    if len(matches) != 1:
+        raise RuntimeError('Cannot uniquely identify the virtual display device.')
+    return matches.pop()
 
 
-def attach(device, width, height, hz, x, y):
+def attach(device, width, height, hz, x, y, expected):
     """Attach only device; return a rollback callable for post-change verification."""
     paths, modes = query()
     active = [p for p in paths if p.flags & 1]
@@ -117,6 +154,8 @@ def attach(device, width, height, hz, x, y):
     if not active or len(candidates) != 1 or candidates[0].flags & 1:
         raise RuntimeError('Cannot uniquely identify the detached virtual display. Refresh display settings and try again.')
     target = PATH.from_buffer_copy(candidates[0])
+    if path_identity(target) != expected:
+        raise RuntimeError('The virtual display was replaced. Its configuration was not changed.')
     target.flags |= 1
     target.sourceInfo.modeInfoIdx = len(modes)
     target.targetInfo.modeInfoIdx = 0xFFFFFFFF
@@ -128,6 +167,8 @@ def attach(device, width, height, hz, x, y):
     configure(proposed_paths, proposed_modes, 0x20 | 0x40)  # USE_SUPPLIED | VALIDATE
 
     def rollback():
+        if identity(device) != expected:
+            raise RuntimeError('The virtual display was replaced. Its layout was not restored.')
         configure(active, modes, 0x20 | 0x80 | 0x200)  # USE_SUPPLIED | APPLY | SAVE_TO_DATABASE
 
     try:

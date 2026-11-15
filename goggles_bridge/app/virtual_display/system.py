@@ -42,17 +42,27 @@ def run_cancellable(command, stop, timeout=30, **kwargs):
 
 
 def powershell_json(script, timeout=15):
-    executable = Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
+    executable = system_directory()/'WindowsPowerShell/v1.0/powershell.exe'
     env = os.environ.copy()
     # A terminal using PowerShell 7 may pass its incompatible modules to the
     # system Windows PowerShell 5.1 child. Only load that child's own modules.
     env['PSModulePath'] = str(executable.parent / 'Modules')
     result = subprocess.run([str(executable), '-NoProfile', '-NonInteractive', '-Command',
-        '[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new(); '+script],
+        "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new(); "+script],
         capture_output=True, timeout=timeout, creationflags=NO_WINDOW, env=env)
     if result.returncode:
         raise RuntimeError('Windows system information query failed')
     return json.loads(result.stdout.decode('utf-8-sig').strip() or 'null')
+
+
+def system_directory():
+    buffer = ctypes.create_unicode_buffer(32768)
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.GetSystemDirectoryW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint]
+    length = kernel.GetSystemDirectoryW(buffer, len(buffer))
+    if not length or length >= len(buffer):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return Path(buffer.value)
 
 
 def sha256(path):

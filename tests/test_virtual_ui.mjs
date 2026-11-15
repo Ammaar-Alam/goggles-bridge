@@ -1,4 +1,4 @@
-// Offline UI regression checks. Run: node --test tests/test_app_ui.mjs
+// Offline UI regression checks. Run: node --test tests/test_virtual_ui.mjs
 // Uses an installed Edge/Chromium; set GOGGLES_UI_BROWSER to override its path.
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
@@ -26,10 +26,15 @@ async function until(check, description) {
   throw new Error(`Timed out: ${description}`);
 }
 function call(method, params = {}) {
+  const id = ++sequence;
+  let timeout;
   return new Promise((resolve, reject) => {
-    const id = ++sequence;
+    timeout = setTimeout(() => reject(new Error(`Browser debugger timed out: ${method}`)), 10000);
     pending.set(id, { resolve, reject });
     socket.send(JSON.stringify({ id, method, params }));
+  }).finally(() => {
+    clearTimeout(timeout);
+    pending.delete(id);
   });
 }
 function event(method) {
@@ -54,7 +59,7 @@ async function capture(name) {
   await writeFile(path.join(captures, `${name}.png`), Buffer.from(data, 'base64'));
 }
 const visible = key => evaluate(`!document.querySelector('[data-option="${key}"]').hidden`);
-const uiTest = (name, run) => test(name, { skip: !available }, run);
+const uiTest = (name, run) => test(name, { skip: !available, timeout: 45000 }, run);
 
 before(async () => {
   if (!available) return;
@@ -64,7 +69,7 @@ before(async () => {
   const portFile = path.join(profile, 'DevToolsActivePort');
   await until(() => existsSync(portFile), 'browser debugger');
   const port = (await readFile(portFile, 'utf8')).split('\n')[0];
-  const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+  const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(5000) })).json();
   socket = new WebSocket(targets.find(target => target.type === 'page').webSocketDebuggerUrl);
   await new Promise((resolve, reject) => {
     socket.addEventListener('open', resolve, { once: true });
@@ -74,7 +79,7 @@ before(async () => {
     const message = JSON.parse(data);
     if (message.id) {
       const request = pending.get(message.id);
-      pending.delete(message.id);
+      if (!request) return; // A response can arrive after its request timed out.
       message.error ? request.reject(new Error(message.error.message)) : request.resolve(message.result);
     } else if (message.method === 'Runtime.exceptionThrown') errors.push(message.params.exceptionDetails);
     if (events.has(message.method)) {
@@ -85,11 +90,12 @@ before(async () => {
   await call('Page.enable');
   await call('Runtime.enable');
   await call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
-});
+}, { timeout: 15000 });
 after(async () => {
   if (!available) return;
   if (socket?.readyState === WebSocket.OPEN) await call('Browser.close').catch(() => {});
   socket?.close();
+  events.clear();
   processHandle?.kill();
   if (profile) {
     assert.equal(path.dirname(profile), path.resolve(tmpdir()));
@@ -105,7 +111,7 @@ uiTest('physical and virtual source round trip preserves advanced controls and v
   await evaluate("window.demoBackend.set_options({capture:'ddagrab',h264_profile:'baseline',adaptive_quant:true,keyframe_seconds:1,source:'virtual'})");
   await until(async () => !(await visible('capture')), 'virtual controls');
   assert.equal(await visible('display_index'), false);
-  for (const key of ['virtual_resolution', 'virtual_driver', 'h264_profile', 'adaptive_quant', 'keyframe_seconds', 'preset', 'low_latency', 'usb_write_size']) assert.equal(await visible(key), true, key);
+  for (const key of ['virtual_resolution', 'h264_profile', 'adaptive_quant', 'keyframe_seconds', 'preset', 'low_latency', 'usb_write_size']) assert.equal(await visible(key), true, key);
   await capture('virtual-advanced');
   await evaluate("window.demoBackend.set_options({source:'display'})");
   await until(() => visible('capture'), 'physical controls restored');
@@ -114,18 +120,54 @@ uiTest('physical and virtual source round trip preserves advanced controls and v
 });
 uiTest('driver setup locks options and foreign drivers are left alone', async () => {
   await open('state=novirtual', 940, 660);
-  assert.equal(await evaluate("document.querySelector('#action').textContent"), 'Install display driver');
+  assert.equal(await evaluate("document.querySelector('#action').textContent"), 'Open setup guide');
   await evaluate("document.querySelector('#action').click()");
+  assert.equal(await evaluate("document.querySelector('#guide-action').textContent"), 'Install display driver');
+  assert.equal(await evaluate("document.querySelector('[data-option=virtual_driver]')"), null);
+  await evaluate("document.querySelector('#guide-action').click()");
   await until(() => evaluate("document.querySelector('#options').disabled"), 'driver setup lock');
   await until(() => evaluate("!document.querySelector('#options').disabled"), 'driver setup finished');
   await open('state=foreignvirtual');
-  assert.equal(await evaluate("document.querySelector('#action').disabled"), true);
-  assert.equal(await evaluate("document.querySelector('[data-option=virtual_driver] button').disabled"), true);
+  await evaluate("document.querySelector('#action').click()");
+  assert.equal(await evaluate("document.querySelector('#guide-action').disabled"), true);
+  assert.equal(await evaluate("document.querySelector('#guide-remove-display').hidden"), true);
   await capture('foreign-driver');
 });
 uiTest('mac keeps its original options without virtual-display controls', async () => {
   await open('mac');
-  for (const key of ['source', 'virtual_resolution', 'virtual_driver', 'capture']) assert.equal(await visible(key), false, key);
+  for (const key of ['source', 'virtual_resolution', 'capture']) assert.equal(await visible(key), false, key);
   for (const key of ['display_index', 'keyframe_seconds', 'h264_profile', 'low_latency', 'usb_write_size']) assert.equal(await visible(key), true, key);
   assert.deepEqual(errors, []);
+});
+
+uiTest('unverified old installation explains removal instead of offering unsafe repair', async () => {
+  await open('state=previousvirtual');
+  await evaluate("document.querySelector('#action').click()");
+  assert.equal(await evaluate("document.querySelector('#guide-action').textContent"), 'Uninstall previous driver first');
+  assert.equal(await evaluate("document.querySelector('#guide-action').disabled"), true);
+  assert.equal(await evaluate("document.querySelector('#guide-remove-display').hidden"), true);
+  assert.match(await evaluate("document.querySelector('#guide-status-text').textContent"), /original app or its Windows uninstall entry/);
+  await evaluate("window.demoBackend.set_options({source:'display'})");
+  await until(() => evaluate("!document.querySelector('#guide-action').disabled"), 'physical source remains available');
+  assert.equal(await evaluate("document.querySelector('#guide-action').textContent"), 'Continue');
+});
+
+uiTest('720p desktop is described as enlarged 1080p output', async () => {
+  await open('state=streaming');
+  await evaluate("window.demoBackend.set_options({source:'virtual',virtual_resolution:'720p'})");
+  await until(() => evaluate("document.querySelector('#subline').textContent.includes('Enlarged from a 1280 × 720 desktop')"), 'resolution description');
+  assert.match(await evaluate("document.querySelector('#subline').textContent"), /1920 × 1080/);
+});
+uiTest('repair and removal remain available in the guide', async () => {
+  await open('state=brokenvirtual');
+  await evaluate("window.demoBackend.set_options({source:'display'})");
+  await until(() => visible('capture'), 'physical source');
+  await evaluate("document.querySelector('#open-guide').click()");
+  assert.equal(await evaluate("document.querySelector('#guide-action').textContent"),'Repair display driver');
+  assert.equal(await evaluate("document.querySelector('#guide-remove-display').hidden"),false);
+  await evaluate("document.querySelector('#guide-action').click()");
+  await until(() => evaluate("document.querySelector('#guide-status-text').textContent.includes('ready')"),'repair complete');
+  await evaluate("document.querySelector('#guide-remove-display').click()");
+  await until(() => evaluate("document.querySelector('#guide-remove-display').hidden"),'driver removed');
+  assert.equal(await evaluate("document.querySelector('#guide-action').textContent"), 'Continue');
 });

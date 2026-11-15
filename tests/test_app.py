@@ -49,11 +49,10 @@ class AppTests(unittest.TestCase):
         self.addCleanup(lambda: (app.stop(), app._thread and app._thread.join(5)))
         return app
 
-    def wait_for(self, app, phase, predicate=lambda state: True):
+    def wait_for(self, app, phase):
         for _ in range(200):
-            state = app.snapshot()
-            if state['phase'] == phase and predicate(state):
-                return state
+            if app.snapshot()['phase'] == phase:
+                return app.snapshot()
             threading.Event().wait(.01)
         self.fail(f"phase stayed {app.snapshot()['phase']}, expected {phase}")
 
@@ -67,7 +66,7 @@ class AppTests(unittest.TestCase):
         app = self.app(events)
         self.assertEqual(app.snapshot()['phase'], 'idle')
         app.start()
-        state = self.wait_for(app, 'streaming', lambda state: state['oversize'] == 1)
+        state = self.wait_for(app, 'streaming')
         self.assertEqual(state['device'], describe('DJI Goggles 2', 'E3T ZV900 AC Dec 24 2024|12:34:04'))
         self.assertEqual(state['stats'], dict(fps=99.5, send_ms_p95=.7, frame_bytes_max=43000))
         self.assertEqual(state['oversize'], 1)

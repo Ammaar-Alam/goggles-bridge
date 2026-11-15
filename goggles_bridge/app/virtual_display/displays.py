@@ -3,6 +3,8 @@ import ctypes as C
 from ctypes import wintypes as W
 import time
 
+from . import display_config
+
 
 class DisplayError(RuntimeError):
     pass
@@ -71,9 +73,7 @@ def inventory():
         current = mode(device.DeviceName)
         monitor_device = DISPLAY_DEVICE(cb=C.sizeof(DISPLAY_DEVICE))
         user.EnumDisplayDevicesW(device.DeviceName, 0, C.byref(monitor_device), 0)
-        result.append(dict(device=device.DeviceName, id=device.DeviceName,
-            name=monitor_device.DeviceString or device.DeviceString, adapter=device.DeviceString,
-            hardware_id=device.DeviceID, monitor=monitor_device.DeviceString,
+        result.append(dict(device=device.DeviceName, hardware_id=device.DeviceID,
             monitor_id=monitor_device.DeviceID, active=bool(device.StateFlags & 1),
             primary=bool(device.StateFlags & 4), hmonitor=handles.get(device.DeviceName),
             width=current.dmPelsWidth if current else 0, height=current.dmPelsHeight if current else 0,
@@ -83,42 +83,35 @@ def inventory():
 
 
 def virtual_display(rows=None):
-    candidates = [r for r in (inventory() if rows is None else rows)
-                  if r['hardware_id'].lower() in ('root\\mttvdd','mttvdd') and r['monitor_id']]
+    from .virtual_driver import owned_instance, _owns_configuration, _instance_registered
+    instance = owned_instance()
+    if not instance or not _owns_configuration() or not _instance_registered(instance):
+        raise DisplayError('This app does not own the virtual display. Check the setup guide.')
+    candidates = []
+    for row in inventory() if rows is None else rows:
+        if row['hardware_id'].lower() in ('root\\mttvdd', 'mttvdd') and row['monitor_id']:
+            identity = display_config.identity(row['device'])
+            if identity[0] == instance.casefold():
+                candidates.append(dict(row, identity=identity))
     if len(candidates) != 1:
-        raise DisplayError('Expected exactly one virtual display. Install the driver, or check for conflicting virtual displays.')
+        raise DisplayError('Cannot find exactly one display owned by this app. Check the setup guide.')
     return candidates[0]
 
 
-def select_source(source, width=1920, height=1080, hz=60, *, device=None):
-    rows = inventory()
-    if source in ('virtual',):
-        target = virtual_display(rows)
-        if not target['active'] or not target['hmonitor']:
-            raise DisplayError('The virtual display is not active. Check the driver and try again.')
-        if (target['width'], target['height'], target['hz']) != (width, height, hz) or target['primary']:
-            raise DisplayError(f'The virtual display must be a secondary {width} × {height} / {hz} Hz display.')
-    elif source in ('display',):
-        target = next((r for r in rows if r['active'] and r['hmonitor'] and
-                       (r['device'] == device if device else r['primary'])), None)
-        if target is None:
-            raise DisplayError('The selected display was disconnected. Select a display again.' if device else
-                               'No active primary display was found. Keep the desktop unlocked.')
-    else:
-        raise DisplayError('Unsupported display source')
+def select_source(width, height, hz, *, expected):
+    target = virtual_display()
+    if target['identity'] != expected['identity'] or target['monitor_id'] != expected['monitor_id']:
+        raise DisplayError('The leased display was replaced. Start the stream again.')
+    if not target['active'] or not target['hmonitor']:
+        raise DisplayError('The virtual display is not active. Check the driver and try again.')
+    if (target['width'], target['height'], target['hz']) != (width, height, hz) or target['primary']:
+        raise DisplayError(f'The virtual display must be a secondary {width} × {height} / {hz} Hz display.')
     return target
-
-
-def _require_owned_driver():
-    from .virtual_driver import status
-    if not status().get('owned'):
-        raise DisplayError('This app does not own the virtual display configuration. Other apps\' displays are left unchanged.')
 
 
 def enable_extended(width=1920, height=1080, hz=60):
     if (width, height) not in ((1280, 720), (1920, 1080)) or hz not in (60, 75, 90, 100):
         raise DisplayError('Unsupported virtual display mode')
-    _require_owned_driver()
     before = inventory()
     target = virtual_display(before)
     if target['primary']:
@@ -147,6 +140,8 @@ def enable_extended(width=1920, height=1080, hz=60):
     legacy_changed = False
     try:
         if target['active']:
+            if display_config.identity(target['device']) != target['identity']:
+                raise DisplayError('The virtual display was replaced. Its configuration was not changed.')
             status = api().ChangeDisplaySettingsExW(target['device'], C.byref(desired), None, 3, None)
             if status != 0:
                 raise DisplayError(f'Windows rejected the virtual display mode ({status}).')
@@ -155,8 +150,8 @@ def enable_extended(width=1920, height=1080, hz=60):
             if status != 0:
                 raise DisplayError(f'Windows could not enable the virtual display ({status}).')
         else:
-            from .display_config import attach
-            rollback = attach(target['device'], width, height, hz, desired.x, desired.y)
+            rollback = display_config.attach(target['device'], width, height, hz, desired.x, desired.y,
+                                             target['identity'])
         deadline = time.monotonic()+8
         while time.monotonic() < deadline:
             after = inventory()
@@ -168,7 +163,7 @@ def enable_extended(width=1920, height=1080, hz=60):
             if not current.get('active') or not current.get('hmonitor'):
                 time.sleep(.2)
                 continue
-            result = select_source('virtual', width, height, hz)
+            result = select_source(width, height, hz, expected=target)
             return result
         raise DisplayError('The virtual display did not activate. Check Windows display settings.')
     except Exception as exc:
@@ -181,31 +176,34 @@ def enable_extended(width=1920, height=1080, hz=60):
             raise
         if not legacy_changed:
             raise
+        if display_config.identity(target['device']) != target['identity']:
+            raise DisplayError('The virtual display was replaced. Its layout was not restored.') from exc
         # Stage a rollback of the exact pre-change modes, then apply together.
         for device, original in original_modes.items():
             if original:
                 api().ChangeDisplaySettingsExW(device, C.byref(original), None, 0x10000001, None)
-        if target['device'] not in original_modes:
-            detached = DEVMODE(dmSize=C.sizeof(DEVMODE),dmFields=0x20 | 0x80000 | 0x100000)
-            api().ChangeDisplaySettingsExW(target['device'],C.byref(detached),None,0x10000001,None)
         api().ChangeDisplaySettingsExW(None,None,None,0,None)
         raise
 
 
-def disable_extended(*, expected=None):
+def disable_extended(*, expected):
     rows = inventory()
-    if expected and not any(r['hardware_id'].lower() in ('root\\mttvdd', 'mttvdd')
-                            and r['monitor_id'] for r in rows):
+    if not any(r['monitor_id'] == expected['monitor_id'] and
+               r['hardware_id'] == expected['hardware_id'] for r in rows):
+        for row in rows:
+            if (row['hardware_id'] == expected['hardware_id'] and row['monitor_id'] and
+                    display_config.identity(row['device']) == expected['identity']):
+                raise DisplayError('The leased monitor identity changed. Its replacement was not detached.')
         return  # The leased monitor was already removed; there is nothing to detach.
-    _require_owned_driver()
     target = virtual_display(rows)
-    if expected and any(target.get(key) != expected.get(key)
-                        for key in ('device', 'hardware_id', 'monitor_id')):
+    if target['identity'] != expected['identity'] or target['monitor_id'] != expected['monitor_id']:
         raise DisplayError('The leased display identity changed. The replacement display was not detached.')
     if target['primary'] or not any(r['active'] and r['device'] != target['device'] for r in rows):
         raise DisplayError('Cannot detach the primary or only active display.')
     if not target['active']:
         return
+    if display_config.identity(target['device']) != expected['identity']:
+        raise DisplayError('The leased display identity changed. The replacement display was not detached.')
     value = DEVMODE(dmSize=C.sizeof(DEVMODE), dmFields=0x20 | 0x80000 | 0x100000)
     status = api().ChangeDisplaySettingsExW(target['device'], C.byref(value), None, 1, None)
     if status != 0:

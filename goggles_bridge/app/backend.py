@@ -1,4 +1,5 @@
 """Desktop app backend: setup checks, saved options, and the stream engine behind the window."""
+import atexit
 import ctypes as C
 from dataclasses import fields
 from datetime import datetime
@@ -146,7 +147,6 @@ class Desktop:
         self._stop = threading.Event()
         self._thread = None
         self._installing_display = False
-        self._display_install_thread = None
         self._state = dict(phase='idle', problem=None, stats=None, oversize=0, log=None)
         self._checks = (0, None)
         self._displays = []
@@ -195,10 +195,11 @@ class Desktop:
                           screen=dict(needed=MAC, ok=not MAC or screen_access()),
                           ffmpeg=dict(needed=needs_ffmpeg, ok=not needs_ffmpeg or bool(self._ffmpeg and self._ffmpeg.is_file())),
                           attached=goggles_attached())
-            if WINDOWS and self._options['source'] == 'virtual':
+            if WINDOWS:
                 from .virtual_display.virtual_driver import status
                 virtual = status()
-                result['virtual_display'] = dict(virtual, ok=virtual['owned'] and virtual['config_current'])
+                configured = virtual.pop('config_current')
+                result['virtual_display'] = dict(virtual, ok=virtual['owned'] and configured)
             self._checks = (time.monotonic(), result)
             if result['attached'] is False:
                 self._device = None
@@ -240,14 +241,15 @@ class Desktop:
 
     def set_options(self, options):
         """Adopt and save changed options. Returns the problem when the engine refuses them."""
-        if self._running() or self._installing_display:
-            return dict(error='Stop streaming or finish driver setup before changing settings')
-        try:
-            self._settings(options)
-        except (ValueError, TypeError) as exc:
-            return dict(error=str(exc))
-        self._save()
-        self._checks = (0, None)
+        with self._lock:
+            if self._running() or self._installing_display or self._updating:
+                return dict(error='Stop streaming or finish setup before changing settings')
+            try:
+                self._settings(options)
+            except (ValueError, TypeError) as exc:
+                return dict(error=str(exc))
+            self._save()
+            self._checks = (0, None)
         return dict(ok=True)
 
     def install_virtual_display(self, remove=False):
@@ -262,13 +264,24 @@ class Desktop:
         def install():
             try:
                 from .virtual_display.virtual_driver import VirtualInstaller
+                from .virtual_display.paths import install_folder
+                started = time.time()
                 process = VirtualInstaller(remove=remove)
                 while (code := process.poll()) is None:
                     time.sleep(.2)
                 if code not in (0, 3010):
-                    raise RuntimeError(f'Virtual display setup failed ({code}). See the driver setup log in ProgramData/Goggles Bridge.')
+                    message = f'Virtual display setup failed ({code}). See the driver setup log in Program Files/Goggles Bridge Display.'
+                    report = install_folder()/'display-install.json'
+                    try:
+                        if report.stat().st_mtime >= started:
+                            details = json.loads(report.read_text(encoding='utf-8'))
+                            if isinstance(details, dict) and details.get('success') is False and isinstance(details.get('error'), str):
+                                message = details['error']
+                    except (OSError, ValueError):
+                        pass
+                    raise RuntimeError(message)
                 if code == 3010:
-                    raise RuntimeError('Restart Windows to finish virtual display driver setup')
+                    raise RuntimeError('Restart Windows, then run driver setup again to finish.')
                 with self._lock:
                     self._state.update(phase='idle', problem=None)
             except Exception as exc:
@@ -277,8 +290,7 @@ class Desktop:
                 self._checks = (0, None)
                 self._installing_display = False
 
-        self._display_install_thread = threading.Thread(target=install, daemon=False)
-        self._display_install_thread.start()
+        threading.Thread(target=install, daemon=False).start()
         return dict(ok=True)
 
     def finish_setup(self):
@@ -463,7 +475,66 @@ def tint_title_bar(window):
         pass  # cosmetic only
 
 
+def app_mutex_name():
+    """Use the account SID so setup and every Windows session share one identity."""
+    kernel = C.WinDLL('kernel32', use_last_error=True)
+    security = C.WinDLL('advapi32', use_last_error=True)
+    kernel.CloseHandle.argtypes = [C.c_void_p]
+    kernel.LocalFree.argtypes = [C.c_void_p]
+    security.OpenProcessToken.argtypes = [C.c_void_p, C.c_ulong, C.POINTER(C.c_void_p)]
+    security.GetTokenInformation.argtypes = [C.c_void_p, C.c_int, C.c_void_p, C.c_ulong, C.POINTER(C.c_ulong)]
+    security.ConvertSidToStringSidW.argtypes = [C.c_void_p, C.POINTER(C.c_void_p)]
+    token, text, size = C.c_void_p(), C.c_void_p(), C.c_ulong()
+    if not security.OpenProcessToken(C.c_void_p(-1), 8, C.byref(token)):  # current process, TOKEN_QUERY
+        raise C.WinError(C.get_last_error())
+    try:
+        user = C.create_string_buffer(128)  # TOKEN_USER and the maximum 68-byte SID.
+        if not security.GetTokenInformation(token, 1, user, len(user), C.byref(size)):
+            raise C.WinError(C.get_last_error())
+        if not security.ConvertSidToStringSidW(C.c_void_p.from_buffer(user), C.byref(text)):
+            raise C.WinError(C.get_last_error())
+        try:
+            return 'Global\\GogglesBridge.' + C.wstring_at(text)
+        finally:
+            kernel.LocalFree(text)
+    finally:
+        kernel.CloseHandle(token)
+
+
+def hold_app_lifetime():
+    """Register a live GUI while excluding uninstall, without limiting GUI instances."""
+    name = app_mutex_name()
+    kernel = C.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateMutexW.argtypes = [C.c_void_p, C.c_int, C.c_wchar_p]
+    kernel.CreateMutexW.restype = C.c_void_p
+    kernel.WaitForSingleObject.argtypes = [C.c_void_p, C.c_ulong]
+    kernel.ReleaseMutex.argtypes = [C.c_void_p]
+    kernel.CloseHandle.argtypes = [C.c_void_p]
+    gate = kernel.CreateMutexW(None, False, name + '.Uninstall')
+    if not gate:
+        raise C.WinError(C.get_last_error())
+    acquired = False
+    try:
+        result = kernel.WaitForSingleObject(gate, 0)
+        if result == 258:
+            raise SystemExit('Goggles Bridge is being uninstalled. Try again after setup finishes.')
+        if result not in (0, 0x80):
+            raise C.WinError(C.get_last_error())
+        acquired = True
+        marker = kernel.CreateMutexW(None, False, name + '.Running')
+        if not marker:
+            raise C.WinError(C.get_last_error())
+        # Hold the marker until all background threads and the process exit.
+        atexit.register(kernel.CloseHandle, marker)
+    finally:
+        if acquired:
+            kernel.ReleaseMutex(gate)
+        kernel.CloseHandle(gate)
+
+
 def main():
+    if WINDOWS:
+        hold_app_lifetime()
     import webview
     api = Desktop()
     self_test = '--self-test' in sys.argv
@@ -485,12 +556,14 @@ def main():
 
     def check():
         # the packaged app passes when its window draws a status from the backend
-        for _ in range(40):
-            time.sleep(.25)
-            if window.evaluate_js("document.getElementById('version').textContent"):
-                drawn.append(True)
-                break
-        window.destroy()
+        try:
+            for _ in range(40):
+                time.sleep(.25)
+                if window.evaluate_js("document.getElementById('version')?.textContent"):
+                    drawn.append(True)
+                    break
+        finally:
+            window.destroy()
 
     webview.start(check if self_test else None)
     api.stop()
