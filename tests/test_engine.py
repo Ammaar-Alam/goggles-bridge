@@ -386,6 +386,13 @@ class EngineTests(unittest.TestCase):
                            ('-aud', '1'), ('-forced_idr', '1')):
             self.assertEqual(command[command.index(key)+1], value)
         self.assertTrue(command[command.index('-vf')+1].startswith('hwdownload,format=bgra,format=nv12,select='))
+        # Goggles 2 stayed black with AMF intra refresh, so AMF keeps periodic IDRs
+        self.assertNotIn('-intra_refresh_mb', command)
+        stop = threading.Event()
+        events, _ = self.run_case(lambda _: FakeUsb(stop), stop, settings=self.settings(encoder='amf'))
+        self.assertFalse(events[0]['intra_refresh'])
+        self.assertEqual(events[0]['multipass'], 'disabled')
+        self.assertEqual(events[0]['encoder'], 'amf')
         with tempfile.TemporaryDirectory() as folder:
             sys32 = Path(folder) / 'System32'
             sys32.mkdir()

@@ -34,7 +34,8 @@ CHOICES = dict(fps=(60, 75, 90, 100), bitrate_mbps=(8, 10, 12, 16, 20, 24, 30, 3
 # black until a power cycle. The encoder buffer is capped at this size, and larger frames aren't sent
 MAX_FRAME_BYTES = 56_000
 MAX_VBV_BITS = MAX_FRAME_BYTES * 8
-# AMF single-pass CBR can overshoot VBV on the initial IDR frame, so use a tighter VBV cap
+# AMF does not hold -max_au_size on its own: without -qmin 29, frames after a hard scene cut reached
+# 96-117 KB at 32 Mbps on an RX 6700 XT. The QP floor keeps them under the goggles' limit, with this cap
 MAX_AMF_VBV_BITS = 160_000
 # Largest tested average frame, 40 Mbps at 100 fps
 MAX_AVERAGE_FRAME_BYTES = 50_000
@@ -95,7 +96,7 @@ class BridgeSettings:
         for name in CHOICES:
             check(name)
         if self.adaptive_quant and not self.nvenc:
-            raise ValueError('Adaptive quantization needs the Windows NVENC encoder')
+            raise ValueError('Adaptive quantization needs a Windows encoder (NVENC or AMF)')
         # shortcut: only the NVENC buffer cap is verified on goggles, so macOS keeps the earlier
         # 24 Mbps ceiling and its frames are never skipped; lift both once a Mac cap is verified
         if not self.nvenc and self.bitrate_mbps > 24:
@@ -152,6 +153,8 @@ def encoder_command(settings, frames=0):
                       f"st(0,max(ld(0)+1/{settings.fps},pts*TB));1,0))',"
                       # Compact capture gaps so CFR does not replay stale pictures to catch up
                       f'setpts=N/({settings.fps}*TB):strip_fps=1')
+            # h264_amf rejects the D3D11 capture frames (SubmitInput() error 18), so download them first.
+            # Downloading before pacing used about 2.5x less FFmpeg CPU than pacing first on an RX 6700 XT
             vf = f'hwdownload,format=bgra,format=nv12,{pacing}' if settings.encoder == 'amf' else pacing
             command += ['-f', 'lavfi', '-i', source, '-vf', vf,
                         '-r', str(settings.fps), '-fps_mode', 'cfr']
@@ -162,6 +165,8 @@ def encoder_command(settings, frames=0):
                         f'hwdownload,format=bgra,scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease:'
                         f'flags=fast_bilinear,pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2,format=nv12']
         if settings.encoder == 'amf':
+            # Periodic IDRs, not intra refresh: with -intra_refresh_mb, AMF sends only the first IDR and
+            # Goggles 2 (firmware 01.14) stayed black, though FFmpeg decodes that stream correctly
             gop = str(settings.fps * settings.keyframe_seconds)
             bufsize = str(min(bitrate * 2 // settings.fps, MAX_AMF_VBV_BITS))
             profile = 'constrained_baseline' if settings.h264_profile == 'baseline' else 'high'
@@ -285,8 +290,9 @@ class BridgeEngine:
     def run(self):
         with closing(EventLog(self.log_path)) as self.log:
             settings = {name: value for name, value in asdict(self.settings).items() if name not in ('dll', 'ffmpeg')}
-            self.emit('starting', resolution=f'{WIDTH}x{HEIGHT}', intra_refresh=self.settings.nvenc,
-                      multipass='qres' if self.settings.nvenc else 'disabled', **settings)
+            nvenc = self.settings.nvenc and self.settings.encoder == 'nvenc'
+            self.emit('starting', resolution=f'{WIDTH}x{HEIGHT}', intra_refresh=nvenc,
+                      multipass='qres' if nvenc else 'disabled', **settings)
             try:
                 attempt = 0
                 while not self.stopping():
