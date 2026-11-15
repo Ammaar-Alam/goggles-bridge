@@ -160,8 +160,8 @@ def status():
                                     _instance_registered(instance) and _instance_ready(instance)))
 
 
-def verify_package(folder=None):
-    folder = Path(folder) if folder else install_folder()
+def verify_package():
+    folder = install_folder()
     for name, digest in HASHES.items():
         if sha256(folder/name) != digest:
             raise ValueError('Virtual display driver checksum mismatch. Reinstall the app.')

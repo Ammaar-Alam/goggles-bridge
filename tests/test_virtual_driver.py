@@ -34,9 +34,10 @@ class DriverTests(unittest.TestCase):
     def test_virtual_driver_hash_failure_precedes_windows_signature_check(self):
         with tempfile.TemporaryDirectory() as folder:
             Path(folder,'mttvdd.cat').write_bytes(b'tampered')
-            with patch.object(virtual_driver,'powershell_json') as signature:
+            with patch.object(virtual_driver,'powershell_json') as signature, \
+                 patch.object(virtual_driver,'install_folder',return_value=Path(folder)):
                 with self.assertRaises(ValueError):
-                    virtual_driver.verify_package(folder)
+                    virtual_driver.verify_package()
                 signature.assert_not_called()
     def test_maintenance_rejects_arbitrary_or_extra_arguments(self):
         with patch.object(virtual_driver,'elevated_main',return_value=3010) as elevated:
@@ -421,13 +422,20 @@ class DeviceBindingTests(unittest.TestCase):
 
 
 class LauncherTests(unittest.TestCase):
-    def test_development_launch_requires_the_native_installer(self):
-        with tempfile.TemporaryDirectory() as folder, patch.object(paths,'resources',return_value=Path(folder)), \
-             patch.object(paths.sys,'frozen',False,create=True):
+    def test_development_launch_requires_a_packaged_app(self):
+        with patch.object(paths.sys,'frozen',False,create=True), \
+             patch.object(paths.Path,'is_file') as exists:
+            with self.assertRaisesRegex(RuntimeError,'packaged Goggles Bridge'):
+                paths.maintenance_command()
+            exists.assert_not_called()
+
+    def test_packaged_launch_requires_its_bundled_native_installer(self):
+        with tempfile.TemporaryDirectory() as folder, \
+             patch.object(paths.sys,'executable',str(Path(folder)/'Goggles Bridge.exe')), \
+             patch.object(paths.sys,'frozen',True,create=True):
             with self.assertRaisesRegex(RuntimeError,'Build or reinstall'):
                 paths.maintenance_command()
-            (Path(folder)/'dist').mkdir()
-            installer=Path(folder)/'dist/GogglesBridgeDisplay-Setup.exe'
+            installer=Path(folder)/'GogglesBridgeDisplay-Setup.exe'
             installer.write_bytes(b'fixture')
             program,args=paths.maintenance_command()
             self.assertEqual(program,str(installer))
