@@ -38,9 +38,9 @@ On Windows, you need the following hardware and software:
 - FFmpeg with `gfxcapture` and `h264_nvenc`, or `ddagrab` and `h264_amf` for AMD. To install it, run `winget install Gyan.FFmpeg`.
 - [DJI Assistant 2 (Consumer Drones Series)](https://www.dji.com/downloads/softwares/dji-assistant-2-consumer-drones-series), which installs the DJI USB driver 5.0.0.7. See [USB and driver requirements](docs/PROTOCOL.md#usb-and-session).
 
-Tests used FFmpeg build `2026-11-05-git-0893feba65` and NVIDIA driver 610.74. AMD tests used FFmpeg 9.0.2 and a Radeon RX 6700 XT.
+Tests used FFmpeg build `2026-11-05-git-0893feba65`, NVIDIA driver 610.74, and AMD driver 32.0.21045.16010 on a Radeon RX 6700 XT.
 
-When only the AMD driver is installed, the bridge uses AMF with Desktop Duplication (`ddagrab`). Otherwise it uses NVENC with Graphics Capture. Pass `--encoder` or `--capture` to choose.
+If only the AMD driver is installed, the bridge uses AMF with Desktop Duplication (`ddagrab`). Otherwise, it uses NVENC with Graphics Capture (`gfxcapture`). To choose a different encoder or capture method, pass `--encoder` or `--capture`.
 
 On macOS, you need the following:
 
@@ -125,7 +125,7 @@ Use these options to adjust the stream:
 | `--display` | Monitor index, starting at `0` |
 | `--hide-cursor` | Hide the mouse pointer |
 | `--capture` | Windows: `gfxcapture` or `ddagrab`. macOS: `screencapturekit` or `avfoundation` |
-| `--encoder` | Windows: `nvenc` or `amf`. Detected automatically by default |
+| `--encoder` | Windows: `nvenc` or `amf`. The default depends on the installed GPU driver |
 
 Run `python scripts/stream_desktop.py --help` for all options.
 

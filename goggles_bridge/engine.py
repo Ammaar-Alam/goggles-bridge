@@ -34,12 +34,8 @@ CHOICES = dict(fps=(60, 75, 90, 100), bitrate_mbps=(8, 10, 12, 16, 20, 24, 30, 3
 # black until a power cycle. The encoder buffer is capped at this size, and larger frames aren't sent
 MAX_FRAME_BYTES = 56_000
 MAX_VBV_BITS = MAX_FRAME_BYTES * 8
-# AMF treats -max_au_size as a soft target (RX 6700 XT, Adrenalin 32.0.21045): a smaller cap shrinks
-# scene-cut frames, but cuts into grainy content still reached 97-113 KB without a QP floor. The cap
-# also bounds ordinary frames, so it sets the real bitrate: CBR pads the rest of -b:v with filler NALs,
-# which -bsf:v filter_units strips. On a scene-cut clip, 160 kbit with QP floor 29 sent 10 Mbps of
-# picture data with a 44 KB worst cut. Floor 25 gained about 3 dB on dense text, but on goggles
-# desktop cuts reached 61 and 88 KB and restarted the encoder twice in 60 s; floor 29 had none
+# AMF treats max_au_size as a soft limit, so scene cuts passed the goggles limit at QP floors below 29.
+# The cap also holds picture data near 6 Mbps whatever the bitrate setting
 MAX_AMF_VBV_BITS = 160_000
 AMF_QMIN = 29
 WINDOWS_CAPTURES = ('gfxcapture', 'ddagrab')
@@ -69,8 +65,8 @@ class BridgeSettings:
     ffmpeg: Path
     fps: int = 100
     bitrate_mbps: int | None = None
-    # None picks Desktop Duplication for AMF, which reached 97-100 fps where Graphics Capture's
-    # download path delivered 61-65, and Graphics Capture otherwise
+    # None picks Desktop Duplication for AMF (about 75 fps at 100, against 61-66 for Graphics Capture)
+    # and Graphics Capture otherwise
     capture: str | None = None
     capture_fps: int | None = None
     display_index: int = 0
@@ -80,13 +76,13 @@ class BridgeSettings:
     low_latency: bool = True
     usb_write_size: int = 16384
     h264_profile: str = 'high'
-    # NVENC spatial and temporal adaptive quantization, off until its goggles latency is measured
+    # NVENC spatial and temporal or AMF variance-based adaptive quantization, off until its goggles latency is measured
     adaptive_quant: bool = False
     # None detects the installed Windows encoder
     encoder: str | None = None
 
     @property
-    def nvenc(self):
+    def windows(self):
         """Windows captures encode with NVENC or AMF and skip frames over the goggles' size limit."""
         return self.capture in WINDOWS_CAPTURES
 
@@ -106,17 +102,17 @@ class BridgeSettings:
         check('fps')
         if self.bitrate_mbps is None:
             object.__setattr__(self, 'bitrate_mbps',
-                               min(32, self.fps*8*MAX_AVERAGE_FRAME_BYTES//1_000_000) if self.nvenc else 20)
+                               min(32, self.fps*8*MAX_AVERAGE_FRAME_BYTES//1_000_000) if self.windows else 20)
         for name in ('low_latency', 'adaptive_quant'):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f'{name} must be a boolean')
         for name in CHOICES:
             check(name)
-        if self.adaptive_quant and not self.nvenc:
+        if self.adaptive_quant and not self.windows:
             raise ValueError('Adaptive quantization needs a Windows encoder (NVENC or AMF)')
         # shortcut: only the NVENC buffer cap is verified on goggles, so macOS keeps the earlier
         # 24 Mbps ceiling and its frames are never skipped; lift both once a Mac cap is verified
-        if not self.nvenc and self.bitrate_mbps > 24:
+        if not self.windows and self.bitrate_mbps > 24:
             raise ValueError('macOS capture supports at most 24 Mbps')
         # The buffer cap bounds keyframes, but in CBR every frame averages bitrate/fps
         if self.bitrate_mbps * 1_000_000 // (8 * self.fps) > MAX_AVERAGE_FRAME_BYTES:
@@ -142,7 +138,7 @@ def encoder_command(settings, frames=0):
         return (command + ([] if settings.show_cursor else ['--hide-cursor'])
                 + (['--frames', str(frames)] if frames else []))
     # More NVENC bitrate must not enlarge the previous 20 Mbps buffer budget
-    vbv = min(min(bitrate, 20_000_000)*2//settings.fps, MAX_VBV_BITS) if settings.nvenc else bitrate*2//settings.fps
+    vbv = min(min(bitrate, 20_000_000)*2//settings.fps, MAX_VBV_BITS) if settings.windows else bitrate*2//settings.fps
     period = settings.fps*settings.keyframe_seconds
     rate = ['-b:v', str(bitrate), '-maxrate', str(bitrate), '-bufsize', str(vbv), '-bf', '0',
             '-g', str(period), '-level:v', '4.2' if settings.fps == 60 else '5.1',
@@ -173,8 +169,7 @@ def encoder_command(settings, frames=0):
                       f"st(0,max(ld(0)+1/{settings.fps},pts*TB));1,0))',"
                       # Compact capture gaps so CFR does not replay stale pictures to catch up
                       f'setpts=N/({settings.fps}*TB):strip_fps=1')
-            # h264_amf rejects the D3D11 capture frames (SubmitInput() error 18), so download them first.
-            # Downloading before pacing used about 2.5x less FFmpeg CPU than pacing first on an RX 6700 XT
+            # h264_amf rejects D3D11 capture frames, and downloading before pacing used less CPU than after
             vf = f'hwdownload,format=bgra,format=nv12,{pacing}' if settings.encoder == 'amf' else pacing
             command += ['-f', 'lavfi', '-i', source, '-vf', vf,
                         '-r', str(settings.fps), '-fps_mode', 'cfr']
@@ -317,7 +312,7 @@ class BridgeEngine:
     def run(self):
         with closing(EventLog(self.log_path)) as self.log:
             settings = {name: value for name, value in asdict(self.settings).items() if name not in ('dll', 'ffmpeg')}
-            nvenc = self.settings.nvenc and self.settings.encoder == 'nvenc'
+            nvenc = self.settings.windows and self.settings.encoder == 'nvenc'
             self.emit('starting', resolution=f'{WIDTH}x{HEIGHT}', intra_refresh=nvenc,
                       multipass='qres' if nvenc else 'disabled', **settings)
             try:
@@ -465,7 +460,7 @@ class BridgeEngine:
                                 self.emit('capture_restart')
                             continue
                         last_frame = time.perf_counter()
-                        oversize = self.settings.nvenc and len(frame) > MAX_FRAME_BYTES
+                        oversize = self.settings.windows and len(frame) > MAX_FRAME_BYTES
                         if oversize:
                             oversize_count += 1
                             self.emit('oversize_frame', bytes=len(frame), limit=MAX_FRAME_BYTES)
