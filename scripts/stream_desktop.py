@@ -14,8 +14,7 @@ import uuid
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from goggles_bridge import mac_capture
-from goggles_bridge.engine import (CHOICES, HEIGHT, WIDTH, BridgeEngine, BridgeSettings, check_encoder,
-                                   default_windows_encoder, find_program)
+from goggles_bridge.engine import CHOICES, HEIGHT, WIDTH, BridgeEngine, BridgeSettings, check_encoder, find_program
 from goggles_bridge.usb_transport import DEFAULT_DLL, find_dll
 
 MAC = sys.platform == 'darwin'
@@ -76,7 +75,8 @@ def main():
                         help='Turn on NVENC adaptive quantization (Windows only)')
     parser.add_argument('--capture', choices=('screencapturekit', 'avfoundation') if MAC else ('gfxcapture', 'ddagrab'),
                         default=MAC_CAPTURE if MAC else BridgeSettings.capture,
-                        help='Windows: Graphics Capture with GPU scaling, or Desktop Duplication with CPU scaling. '
+                        help='Windows: Graphics Capture with GPU scaling, or Desktop Duplication with CPU scaling '
+                             '(default: Desktop Duplication with AMF, otherwise Graphics Capture). '
                              'macOS: ScreenCaptureKit on 12.3 and later, or AVFoundation through FFmpeg')
     parser.add_argument('--capture-fps', type=int, default=BridgeSettings.capture_fps,
                         help='Maximum capture rate (default: 1000 for Windows Graphics Capture, otherwise 240)')
@@ -84,7 +84,7 @@ def main():
                         default=BridgeSettings.display_index,
                         help='Zero-based monitor index')
     parser.add_argument('--hide-cursor', dest='show_cursor', action='store_false')
-    parser.add_argument('--encoder', choices=CHOICES['encoder'], default=default_windows_encoder(),
+    parser.add_argument('--encoder', choices=CHOICES['encoder'], default=BridgeSettings.encoder,
                         help='Windows hardware encoder: NVIDIA NVENC or AMD AMF (default: auto-detected)')
     parser.add_argument('--preset', choices=CHOICES['preset'], default=BridgeSettings.preset,
                         help='Windows encoder preset (default: %(default)s)')

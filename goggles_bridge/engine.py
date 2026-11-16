@@ -34,9 +34,15 @@ CHOICES = dict(fps=(60, 75, 90, 100), bitrate_mbps=(8, 10, 12, 16, 20, 24, 30, 3
 # black until a power cycle. The encoder buffer is capped at this size, and larger frames aren't sent
 MAX_FRAME_BYTES = 56_000
 MAX_VBV_BITS = MAX_FRAME_BYTES * 8
-# AMF does not hold -max_au_size on its own: without -qmin 29, frames after a hard scene cut reached
-# 96-117 KB at 32 Mbps on an RX 6700 XT. The QP floor keeps them under the goggles' limit, with this cap
+# AMF treats -max_au_size as a soft target (RX 6700 XT, Adrenalin 32.0.21045): a smaller cap shrinks
+# scene-cut frames, but cuts into grainy content still reached 97-113 KB without a QP floor. The cap
+# also bounds ordinary frames, so it sets the real bitrate: CBR pads the rest of -b:v with filler NALs,
+# which -bsf:v filter_units strips. On a scene-cut clip, 160 kbit with QP floor 29 sent 10 Mbps of
+# picture data with a 44 KB worst cut. Floor 25 gained about 3 dB on dense text, but on goggles
+# desktop cuts reached 61 and 88 KB and restarted the encoder twice in 60 s; floor 29 had none
 MAX_AMF_VBV_BITS = 160_000
+AMF_QMIN = 29
+WINDOWS_CAPTURES = ('gfxcapture', 'ddagrab')
 # Largest tested average frame, 40 Mbps at 100 fps
 MAX_AVERAGE_FRAME_BYTES = 50_000
 # seconds without a picture before the encoder restarts
@@ -63,7 +69,9 @@ class BridgeSettings:
     ffmpeg: Path
     fps: int = 100
     bitrate_mbps: int | None = None
-    capture: str = 'gfxcapture'
+    # None picks Desktop Duplication for AMF, which reached 97-100 fps where Graphics Capture's
+    # download path delivered 61-65, and Graphics Capture otherwise
+    capture: str | None = None
     capture_fps: int | None = None
     display_index: int = 0
     show_cursor: bool = True
@@ -74,14 +82,21 @@ class BridgeSettings:
     h264_profile: str = 'high'
     # NVENC spatial and temporal adaptive quantization, off until its goggles latency is measured
     adaptive_quant: bool = False
-    encoder: str = 'nvenc'
+    # None detects the installed Windows encoder
+    encoder: str | None = None
 
     @property
     def nvenc(self):
-        """Windows captures encode with NVENC, the only encoder whose frame-size cap is verified on goggles."""
-        return self.capture in ('gfxcapture', 'ddagrab')
+        """Windows captures encode with NVENC or AMF and skip frames over the goggles' size limit."""
+        return self.capture in WINDOWS_CAPTURES
 
     def __post_init__(self):
+        if self.encoder is None:
+            object.__setattr__(self, 'encoder', default_windows_encoder()
+                               if self.capture in (None, *WINDOWS_CAPTURES) else 'nvenc')
+        if self.capture is None:
+            object.__setattr__(self, 'capture', 'ddagrab' if self.encoder == 'amf' else 'gfxcapture')
+
         def check(name):
             value, choices = getattr(self, name), CHOICES[name]
             if type(value) is not type(choices[0]) or value not in choices:
@@ -180,7 +195,7 @@ def encoder_command(settings, frames=0):
             level = '4.2' if settings.fps == 60 else '5.1'
             command += ['-an', '-c:v', 'h264_amf', '-usage', 'transcoding', '-latency', '1',
                         '-quality', quality, '-rc', 'cbr', '-b:v', str(bitrate), '-maxrate', str(bitrate),
-                        '-bufsize', bufsize, '-max_au_size', bufsize, '-preencode', '1', '-qmin', '29',
+                        '-bufsize', bufsize, '-max_au_size', bufsize, '-preencode', '1', '-qmin', str(AMF_QMIN),
                         '-enforce_hrd', '1', '-filler_data', '0', '-async_depth', '1']
             if settings.adaptive_quant:
                 command += ['-vbaq', '1']

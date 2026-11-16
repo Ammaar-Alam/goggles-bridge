@@ -114,7 +114,8 @@ def screen_access(request=False):
 
 
 def default_options():
-    capture = 'screencapturekit' if MAC else BridgeSettings.capture
+    # encoder stays None, so the engine detects NVENC or AMF; Windows capture follows that encoder
+    capture = 'screencapturekit' if MAC else BridgeSettings(None, None).capture
     return {name: (capture if name == 'capture' else getattr(BridgeSettings, name)) for name in OPTIONS}
 
 

@@ -9,8 +9,9 @@ import unittest
 from unittest import mock
 
 from goggles_bridge.control import V1Stream
-from goggles_bridge.engine import (BridgeEngine, BridgeSettings, MAX_AMF_VBV_BITS, MAX_FRAME_BYTES, MAX_VBV_BITS,
-                                   check_encoder, default_windows_encoder, encoder_command, prioritize_gpu)
+from goggles_bridge.engine import (AMF_QMIN, BridgeEngine, BridgeSettings, MAX_AMF_VBV_BITS, MAX_FRAME_BYTES,
+                                   MAX_VBV_BITS, check_encoder, default_windows_encoder, encoder_command,
+                                   prioritize_gpu)
 from goggles_bridge.mac_capture import helper_path, supported
 from goggles_bridge.session import SessionError
 from goggles_bridge.usb_transport import DeviceNotFoundError, UsbTransportError
@@ -18,6 +19,9 @@ from avi_fixture import stream as avi_stream
 
 
 AUD = b'\0\0\0\1\x09\xf0'
+# defaults follow the host's GPU, so these tests pin detection to NVENC
+DETECTION = mock.patch('goggles_bridge.engine.default_windows_encoder', return_value='nvenc')
+setUpModule, tearDownModule = DETECTION.start, DETECTION.stop
 
 
 class EncoderOutput:
@@ -409,10 +413,11 @@ class EngineTests(unittest.TestCase):
         self.assertIn('OpenEncodeSessionEx failed', check_encoder(settings, run('a\nb\nOpenEncodeSessionEx failed')))
 
     def test_amf_encoder_contract_and_detection(self):
-        command = encoder_command(self.settings(encoder='amf', preset='p1', h264_profile='baseline', adaptive_quant=True))
+        command = encoder_command(self.settings(encoder='amf', capture='gfxcapture', preset='p1',
+                                                h264_profile='baseline', adaptive_quant=True))
         for key, value in (('-c:v', 'h264_amf'), ('-usage', 'transcoding'), ('-latency', '1'),
                            ('-quality', 'speed'), ('-bufsize', str(MAX_AMF_VBV_BITS)),
-                           ('-max_au_size', str(MAX_AMF_VBV_BITS)), ('-preencode', '1'), ('-qmin', '29'),
+                           ('-max_au_size', str(MAX_AMF_VBV_BITS)), ('-preencode', '1'), ('-qmin', str(AMF_QMIN)),
                            ('-vbaq', '1'), ('-g', '300'), ('-header_spacing', '300'),
                            ('-profile:v', 'constrained_baseline'), ('-level', '5.1'),
                            ('-aud', '1'), ('-forced_idr', '1')):
@@ -433,7 +438,14 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(default_windows_encoder(folder), 'amf')
             (sys32 / 'nvEncodeAPI64.dll').write_bytes(b'x')
             self.assertEqual(default_windows_encoder(folder), 'nvenc')
+        # an AMD-only machine gets AMF with Desktop Duplication unless the capture is chosen
+        with mock.patch('goggles_bridge.engine.default_windows_encoder', return_value='amf'):
+            self.assertEqual((self.settings().encoder, self.settings().capture), ('amf', 'ddagrab'))
+            self.assertEqual(self.settings(capture='gfxcapture').encoder, 'amf')
+            self.assertEqual(self.settings(encoder='nvenc').capture, 'gfxcapture')
+            self.assertEqual(self.settings(capture='screencapturekit').encoder, 'nvenc')
+        self.assertEqual((self.settings().encoder, self.settings().capture), ('nvenc', 'gfxcapture'))
         amf_settings = self.settings(encoder='amf')
-        fail = lambda stderr: lambda command, **_: subprocess.CompletedProcess(command, 1, '', stderr)
+        fail =lambda stderr: lambda command, **_: subprocess.CompletedProcess(command, 1, '', stderr)
         self.assertIn('AMD AMF encoder', check_encoder(amf_settings, fail('Encoder not found')))
         self.assertIn('AMD AMF driver', check_encoder(amf_settings, fail('SubmitInput() failed')))
