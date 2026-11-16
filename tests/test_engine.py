@@ -445,19 +445,6 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(self.settings(encoder='nvenc').capture, 'gfxcapture')
             self.assertEqual(self.settings(capture='screencapturekit').encoder, 'nvenc')
         self.assertEqual((self.settings().encoder, self.settings().capture), ('nvenc', 'gfxcapture'))
-        # AMD capture stays on the GPU, captures at the display's refresh, and drops to the output rate
-        self.assertEqual(self.settings(capture='amfcapture').encoder, 'amf')
-        with self.assertRaisesRegex(ValueError, 'AMF encoder'):
-            self.settings(capture='amfcapture', encoder='nvenc')
-        for hz, expected in ((144, 144), (0, 100), (360, 240)):
-            with mock.patch('goggles_bridge.engine.display_refresh', return_value=hz):
-                command = encoder_command(self.settings(capture='amfcapture', display_index=1))
-            self.assertEqual(command[command.index('-i')+1], f'vsrc_amf=monitor_index=1:framerate={expected}')
-            vf = command[command.index('-vf')+1]
-            self.assertTrue(vf.startswith('fps=100,vpp_amf=w=1920:h=1080:'), vf)
-            self.assertIn('color_profile=bt601:out_color_range=studio', vf)
-            self.assertNotIn('hwdownload', vf)
-            self.assertEqual(command[command.index('-c:v')+1], 'h264_amf')
         amf_settings = self.settings(encoder='amf')
         fail =lambda stderr: lambda command, **_: subprocess.CompletedProcess(command, 1, '', stderr)
         self.assertIn('AMD AMF encoder', check_encoder(amf_settings, fail('Encoder not found')))

@@ -35,7 +35,7 @@ LINKS = {
 }
 # only the installed app can replace itself
 UPDATABLE = getattr(sys, 'frozen', False) and (WINDOWS or MAC)
-CAPTURES = (('screencapturekit',) if MAC else ('gfxcapture', 'ddagrab', 'amfcapture'))
+CAPTURES = (('screencapturekit',) if MAC else ('gfxcapture', 'ddagrab'))
 # identity build dates of the firmware that displayed video, by model. Integra 01.09.00.00 also
 # displayed video, but its build date was not recorded, so Integra builds are not judged
 TESTED_BUILDS = {'DJI Goggles 2': {'Dec 24 2024': '01.11.00.00', 'Feb 26 2025': '01.12.00.00',

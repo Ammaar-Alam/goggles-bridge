@@ -27,8 +27,7 @@ NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 # winget adds this folder to PATH, but terminals opened before the install miss it
 WINGET_LINKS = Path(os.environ.get('LOCALAPPDATA', ''), 'Microsoft', 'WinGet', 'Links')
 CHOICES = dict(fps=(60, 75, 90, 100), bitrate_mbps=(8, 10, 12, 16, 20, 24, 30, 32, 40),
-               capture=('gfxcapture', 'ddagrab', 'amfcapture', 'avfoundation', 'screencapturekit'),
-               preset=('p1', 'p4'),
+               capture=('gfxcapture', 'ddagrab', 'avfoundation', 'screencapturekit'), preset=('p1', 'p4'),
                encoder=('nvenc', 'amf'),
                keyframe_seconds=(1, 3), h264_profile=('baseline', 'high'), usb_write_size=USB_WRITE_SIZES)
 # Goggles 2 displayed frames up to 49 KB, but keyframes of about 65 KB froze it or left it
@@ -43,22 +42,7 @@ MAX_VBV_BITS = MAX_FRAME_BYTES * 8
 # desktop cuts reached 61 and 88 KB and restarted the encoder twice in 60 s; floor 29 had none
 MAX_AMF_VBV_BITS = 160_000
 AMF_QMIN = 29
-WINDOWS_CAPTURES = ('gfxcapture', 'ddagrab', 'amfcapture')
-# AMD's own capture (FFmpeg vsrc_amf) keeps frames on the GPU from capture to encoder. Capturing at the
-# display's refresh rate and dropping to the output rate gave 88-92 new pictures a second at 100 fps,
-# against 94-95 for Desktop Duplication, with about a tenth of the CPU. At its default 60 fps, or at
-# 100 fps on a 144 Hz display, it repeated pictures (about 57 new a second). It cannot draw the cursor.
-AMF_CAPTURE_VPP = (f'vpp_amf=w={WIDTH}:h={HEIGHT}:scale_type=bicubic:format=nv12'
-                   ':color_profile=bt601:out_color_range=studio')
-
-
-def display_refresh(index):
-    """Return the refresh rate of a display in capture order, or 0 if it can't be read."""
-    try:
-        from .app.displays import list_displays
-        return next((d['hz'] for d in list_displays() if d['index'] == index), 0)
-    except (OSError, AttributeError, ValueError):
-        return 0
+WINDOWS_CAPTURES = ('gfxcapture', 'ddagrab')
 # Largest tested average frame, 40 Mbps at 100 fps
 MAX_AVERAGE_FRAME_BYTES = 50_000
 # seconds without a picture before the encoder restarts
@@ -108,7 +92,7 @@ class BridgeSettings:
 
     def __post_init__(self):
         if self.encoder is None:
-            object.__setattr__(self, 'encoder', 'amf' if self.capture == 'amfcapture' else default_windows_encoder()
+            object.__setattr__(self, 'encoder', default_windows_encoder()
                                if self.capture in (None, *WINDOWS_CAPTURES) else 'nvenc')
         if self.capture is None:
             object.__setattr__(self, 'capture', 'ddagrab' if self.encoder == 'amf' else 'gfxcapture')
@@ -128,8 +112,6 @@ class BridgeSettings:
                 raise ValueError(f'{name} must be a boolean')
         for name in CHOICES:
             check(name)
-        if self.capture == 'amfcapture' and self.encoder != 'amf':
-            raise ValueError('AMD capture needs the AMF encoder')
         if self.adaptive_quant and not self.nvenc:
             raise ValueError('Adaptive quantization needs a Windows encoder (NVENC or AMF)')
         # shortcut: only the NVENC buffer cap is verified on goggles, so macOS keeps the earlier
@@ -196,12 +178,6 @@ def encoder_command(settings, frames=0):
             vf = f'hwdownload,format=bgra,format=nv12,{pacing}' if settings.encoder == 'amf' else pacing
             command += ['-f', 'lavfi', '-i', source, '-vf', vf,
                         '-r', str(settings.fps), '-fps_mode', 'cfr']
-        elif settings.capture == 'amfcapture':
-            # The capture rejects rates above the display's refresh (240 on a 144 Hz display)
-            rate = min(display_refresh(settings.display_index) or settings.fps, settings.capture_fps)
-            source = f'vsrc_amf=monitor_index={settings.display_index}:framerate={rate}'
-            # gfxcapture's select pacing doesn't drop these frames, but fps does
-            command += ['-f', 'lavfi', '-i', source, '-vf', f'fps={settings.fps},{AMF_CAPTURE_VPP}']
         else:
             source = (f'ddagrab=output_idx={settings.display_index}:framerate={settings.fps}'
                       f':draw_mouse={int(settings.show_cursor)}')
