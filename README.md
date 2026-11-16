@@ -124,7 +124,7 @@ Use these options to adjust the stream:
 | `--bitrate-mbps` | `8`, `10`, `12`, `16`, `20`, `24`. On Windows, also `30`, `32`, and `40` |
 | `--display` | Monitor index, starting at `0` |
 | `--hide-cursor` | Hide the mouse pointer |
-| `--capture` | Windows: `gfxcapture`, `ddagrab`, or `amfcapture` (AMD only, no mouse pointer). macOS: `screencapturekit` or `avfoundation` |
+| `--capture` | Windows: `gfxcapture` or `ddagrab`. macOS: `screencapturekit` or `avfoundation` |
 | `--encoder` | Windows: `nvenc` or `amf`. Detected automatically by default |
 
 Run `python scripts/stream_desktop.py --help` for all options.
