@@ -6,6 +6,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 from goggles_bridge.control import V1Stream
 from goggles_bridge.engine import (BridgeEngine, BridgeSettings, MAX_AMF_VBV_BITS, MAX_FRAME_BYTES, MAX_VBV_BITS,
@@ -207,6 +208,7 @@ class EngineTests(unittest.TestCase):
         command = encoder_command(self.settings())
         source = command[command.index('-i')+1]
         self.assertIn('scale_aspect', source)
+        self.assertIn('max_framerate=1000:', source)
         self.assertNotIn('hwdownload', command[command.index('-vf')+1])
         self.assertIn('strip_fps=1', command[command.index('-vf')+1])
         for key, value in (('-r','100'), ('-level:v','5.1'), ('-bf','0'), ('-aud','1'), ('-bufsize','400000')):
@@ -214,6 +216,14 @@ class EngineTests(unittest.TestCase):
         command = encoder_command(self.settings(fps=60, capture='ddagrab'))
         self.assertEqual(command[command.index('-level:v')+1], '4.2')
         self.assertIn('force_original_aspect_ratio=decrease', command[command.index('-vf')+1])
+
+    def test_capture_ceiling_defaults_and_explicit_override(self):
+        for capture in ('ddagrab', 'avfoundation', 'screencapturekit'):
+            with self.subTest(capture=capture):
+                self.assertEqual(self.settings(capture=capture).capture_fps, 240)
+        settings = self.settings(capture_fps=144)
+        command = encoder_command(settings)
+        self.assertIn('max_framerate=144:', command[command.index('-i')+1])
 
     def test_frame_rates_reach_every_capture_backend(self):
         for fps in (60, 75, 90, 100):
@@ -256,14 +266,17 @@ class EngineTests(unittest.TestCase):
         self.assertIn('brew upgrade ffmpeg', check_encoder(settings, fail('Error opening output files: Filter not found')))
         self.assertIn('screen recording', check_encoder(settings, fail('Error opening input files: Input/output error')))
 
-    def test_windows_default_keeps_buffer_small_and_avoids_periodic_idr(self):
+    def test_windows_default_keeps_buffer_small_and_repeats_idr(self):
         settings = self.settings()
         command = encoder_command(settings)
         for flag, expected in (('-preset', 'p1'), ('-b:v', '32000000'), ('-maxrate', '32000000'),
                                ('-bufsize', '400000'), ('-bf', '0'), ('-delay', '0'), ('-r', '100'),
                                ('-multipass', 'qres'), ('-intra-refresh', '1'),
-                               ('-single-slice-intra-refresh', '1')):
+                               ('-single-slice-intra-refresh', '0'), ('-forced-idr', '1'),
+                               ('-force_key_frames', 'expr:not(mod(n,300))+lt(n,300)*not(mod(n,10))')):
             self.assertEqual(command[command.index(flag)+1], expected)
+        command = encoder_command(self.settings(fps=75, keyframe_seconds=1))
+        self.assertEqual(command[command.index('-force_key_frames')+1], 'expr:not(mod(n,75))+lt(n,75)*not(mod(n,7))')
         self.assertEqual(command[-3:], ['-f', 'avi', 'pipe:1'])
         for capture in ('gfxcapture', 'ddagrab'):
             for fps in (60, 75, 90, 100):
@@ -276,6 +289,7 @@ class EngineTests(unittest.TestCase):
                         command = encoder_command(self.settings(capture=capture, fps=fps, bitrate_mbps=bitrate))
                         self.assertEqual(command[command.index('-bufsize')+1], str(min(min(bitrate, 20)*2_000_000//fps, MAX_VBV_BITS)))
                         self.assertEqual(command[command.index('-intra-refresh')+1], '1')
+                        self.assertEqual(command[command.index('-single-slice-intra-refresh')+1], '0')
         for capture in ('avfoundation', 'screencapturekit'):
             settings_mac = self.settings(capture=capture)
             self.assertEqual(settings_mac.bitrate_mbps, 20)
@@ -360,6 +374,24 @@ class EngineTests(unittest.TestCase):
                 dropped = [e for e in events if e['event'] == 'oversize_frame']
                 self.assertEqual(len(dropped), capture == 'gfxcapture')
                 self.assertTrue(all(e['limit'] == MAX_FRAME_BYTES for e in dropped))
+
+    def test_silent_capture_restarts_the_encoder_unless_it_never_sent_a_picture(self):
+        stop = threading.Event()
+        usb = FakeUsb(threading.Event())
+        started = []
+        def encoder():
+            started.append(1)
+            if len(started) == 3:
+                stop.set()
+            return FakeEncoder(framed=True)
+        with mock.patch('goggles_bridge.engine.SILENT_SECONDS', .05):
+            events, encoders = self.run_case(lambda _: usb, stop, encoder_factory=encoder)
+            self.assertEqual(len(usb.video), 2)
+            self.assertEqual([e['event'] for e in events].count('capture_restart'), 2)
+            self.assertTrue(all(e.terminated for e in encoders))
+            with self.assertRaisesRegex(RuntimeError, 'No video from display'):
+                self.run_case(lambda _: FakeUsb(threading.Event()), threading.Event(),
+                              encoder_factory=lambda: FakeEncoder(framed=True, packets=()))
 
     def test_encoder_check_runs_one_frame_and_explains_missing_features(self):
         calls = []

@@ -1,15 +1,33 @@
-# G2 Bridge
+<p align="center">
+  <img src="goggles_bridge/app/ui/icon.svg" width="96" alt="">
+</p>
 
-Stream your Windows or Mac desktop to DJI Goggles 2 or DJI Goggles Integra over USB. The goggles use Virtual Flight mode with stock firmware. The simulator and controller run on the computer.
+<h1 align="center">Goggles Bridge</h1>
+
+<p align="center">Your screen, in your DJI goggles.</p>
+
+<p align="center">
+  <a href="https://github.com/Ammaar-Alam/goggles-bridge/releases/latest">Download</a> ·
+  <a href="docs/LATENCY.md">Latency</a> ·
+  <a href="CONTRIBUTING.md">Contributing</a>
+</p>
+
+https://github.com/user-attachments/assets/273c06b9-3275-4446-9f38-1e03a633cfc1
+
+Goggles Bridge streams a Windows or Mac display to DJI Goggles 2 or DJI Goggles Integra over a USB cable. The goggles keep their stock firmware and show the stream in Virtual Flight mode. Your simulator and controller run on the computer.
+
+The desktop app for Windows and Mac includes a setup guide and installs updates from its window.
+
+At 1080p100, the median monitor-to-lens delay is about 12 ms on Windows and about 10 ms on macOS. For more information, see [Measure video delay](docs/LATENCY.md).
+
+## Supported goggles
 
 The bridge detects the model when it connects:
 
 | Goggles | Identity | Tested firmware |
 | --- | --- | --- |
-| DJI Goggles 2 | `E3T ZV900` | 01.11.00.00, 01.14.00.00 |
+| DJI Goggles 2 | `E3T ZV900` | 01.11.00.00, 01.12.00.00, 01.14.00.00 (latest) |
 | DJI Goggles Integra | `E3T ZV901` | 01.09.00.00 |
-
-We measured **about 12 ms median monitor-to-lens delay** at 1080p100. See [how we measured it](docs/LATENCY.md).
 
 ## Requirements
 
@@ -31,7 +49,34 @@ On macOS, you need the following:
 
 The stream script offers to install whatever is missing. Tests used an M2 Pro MacBook Pro with macOS 27.0, Swift 6.4.2, and Homebrew FFmpeg 8.1.1.
 
-## Start streaming
+## Use the desktop app
+
+To stream from Windows without installing Python or FFmpeg, use the Goggles Bridge app:
+
+1. Install [DJI Assistant 2 (Consumer Drones Series)](https://www.dji.com/downloads/softwares/dji-assistant-2-consumer-drones-series) for its USB driver.
+2. Download `GogglesBridge-VERSION-Setup.exe` from [Releases](https://github.com/Ammaar-Alam/goggles-bridge/releases), and then run it. The installer isn't signed, so Windows might show a SmartScreen warning.
+3. Open Goggles Bridge, and then follow the setup guide.
+
+The app requires 64-bit Windows 10 or 11, an NVIDIA GPU, and the Microsoft Edge WebView2 Runtime, which Windows 11 includes.
+
+On a Mac with Apple silicon and macOS 12.3 or later, download `GogglesBridge-VERSION.dmg` from [Releases](https://github.com/Ammaar-Alam/goggles-bridge/releases), and then drag Goggles Bridge to Applications. The setup guide asks for screen recording permission. Connect the goggles with a USB-A-to-USB-C cable.
+
+![The Goggles Bridge window on a Mac, asking for screen recording permission. The numbers are simulated.](docs/images/app-window-mac.png)
+
+To update the app, select **Update to VERSION** at the bottom of the window.
+
+![The Goggles Bridge window while streaming. A drawing shows a computer connected to goggles, next to the stream settings. The numbers are simulated.](docs/images/app-window.png)
+
+To run the app from the repository, install its dependencies and start it:
+
+```powershell
+python -m pip install -r requirements-app.txt
+python scripts/goggles_bridge_app.py
+```
+
+To build the installer or the Mac app, see the [packaging notes](packaging/README.md).
+
+## Start streaming from the command line
 
 1. Power on the goggles, connect a USB data cable, and open **More > DJI Virtual Flight**. On a Mac, when macOS asks whether the accessory can connect, select **Allow**.
 2. From the repository root, install the Python dependencies.
@@ -86,8 +131,15 @@ These values set the stream rate, not the goggles' panel refresh rate. Lower
 rates provide more bits per frame at the same bitrate, but increase the time
 between frames. The 100 fps target has the shortest frame interval.
 
-Windows encoding uses gradual refresh to reduce periodic compression blur.
+Windows encoding uses gradual refresh to reduce periodic compression blur. It
+also sends a keyframe every three seconds, and more often in the first three,
+so the goggles can start decoding at any point. To change the interval, use
+`--keyframe-seconds`.
 For details, see the [quality measurements and reproduction steps](docs/research/WINDOWS_QUALITY.md).
+
+FFmpeg 9.0 and earlier capture a frame only when the screen changes. On a still
+desktop, the bridge then reports only a few frames per second. Motion restores
+the full rate.
 
 ## Run tests
 
@@ -105,6 +157,6 @@ See the [contribution guide](CONTRIBUTING.md) to report bugs, submit changes, or
 
 ## License
 
-Copyright (C) 2026 G2 Bridge contributors.
+Copyright (C) 2026 Goggles Bridge contributors.
 
 The original code and documentation are licensed under the [GNU General Public License v3.0 only](LICENSE) (`GPL-3.0-only`). Third-party materials retain their own licenses.

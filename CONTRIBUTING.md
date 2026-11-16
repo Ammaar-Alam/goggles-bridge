@@ -4,11 +4,15 @@ Bug reports, fixes, and protocol research are welcome.
 
 ## Report a problem
 
-Open an [issue](https://github.com/Ammaar-Alam/g2-bridge/issues) with steps to reproduce the problem. Include your goggles model and firmware, operating system version, command, and a relevant log excerpt. Remove device serials and personal information from logs before sharing them.
+Open an [issue](https://github.com/Ammaar-Alam/goggles-bridge/issues) with steps to reproduce the problem. Include your goggles model and firmware, operating system version, command, and a relevant log excerpt. Remove device serials and personal information from logs before sharing them.
 
 ## Submit a change
 
 Fork the repository, create a branch, and open a pull request against `main`. Keep each pull request focused. Describe the problem, your change, and how you checked it.
+
+Please keep in mind general repository hygiene, including ensuring each pull request is small enough to be reviewable. For a new feature or a large change, open an issue first so the high-level approach can be agreed on.
+
+If your change affects streaming, capture, or the app, test it on your goggles. Latency should stay the same or improve. If a change might affect latency, include a before-and-after measurement. For more information, see [Measure video delay](docs/LATENCY.md).
 
 Install the dependencies and run the offline tests from the repository root:
 

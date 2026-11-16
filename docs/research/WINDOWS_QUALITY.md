@@ -6,7 +6,7 @@ reduces median host delay on the tested PC. The headset comparison did not
 establish a noticeable improvement. Panel cadence and optical latency remain
 unverified.
 
-The frame-size safeguards from [PR #18](https://github.com/Ammaar-Alam/g2-bridge/pull/18)
+The frame-size safeguards from [PR #18](https://github.com/Ammaar-Alam/goggles-bridge/pull/18)
 apply to Windows encoding. Defaults adapt to the selected frame rate, and an
 oversized picture triggers an encoder restart without reopening USB.
 
@@ -14,7 +14,7 @@ oversized picture triggers an encoder restart without reopening USB.
 
 At 100 fps, the quality configuration uses NVENC High profile, the `p1` preset, 32 Mbps
 constant bitrate (CBR), quarter-resolution two-pass rate
-control, and single-slice gradual intra refresh. Output stays at 1920x1080 and
+control, and gradual intra refresh. Output stays at 1920x1080 and
 100 fps, with a 400,000-bit video buffering verifier (VBV) buffer, no B frames,
 zero output delay, and
 immediate AVI frame delivery. The default recovery interval is three seconds.
@@ -23,9 +23,13 @@ The same encoding settings apply to Desktop Duplication. Windows selects
 The buffer cannot exceed 448,000 bits or two frames of the previous 20 Mbps budget.
 macOS encoding remains unchanged.
 
-Gradual refresh replaces the recurring instantaneous decoder refresh (IDR)
-pictures that blurred text in the decoded comparison. The first picture is
-an IDR. The buffer setting is not a guaranteed maximum picture size.
+Gradual refresh replaced the recurring instantaneous decoder refresh (IDR)
+pictures that blurred text in the decoded comparison. With gradual refresh
+alone, only the first picture is an IDR. Goggles that miss it show a black
+screen for the rest of the stream, so the encoder also
+[repeats the IDR](#recurring-idr-pictures). The comparisons in
+[Image quality](#image-quality) predate the recurring IDR pictures.
+The buffer setting is not a guaranteed maximum picture size.
 Before transmission, the bridge rejects Windows pictures larger than 56,000 bytes.
 It stops the encoder, discards queued dependent pictures, and starts an encoder
 that supplies a fresh IDR. The USB session and packet sequence remain intact.
@@ -45,6 +49,9 @@ ratio (PSNR) and structural similarity (SSIM) measure fidelity to that reference
 Whole-sequence PSNR comes from FFmpeg's final summary, which accumulates mean
 squared pixel error before conversion to decibels. It is not the arithmetic
 mean of per-frame PSNR.
+The original quality comparisons used single-slice refresh. The
+[picture-size comparison](#picture-sizes-during-refresh) evaluates allowing
+multiple slices during refresh.
 The following table compares the original `p4` configuration at 20 Mbps with
 the `p1` quality configuration at 32 Mbps:
 
@@ -99,6 +106,46 @@ text encodes produced pictures of 60,525 and 59,137 bytes despite the buffer cap
 The guard would reject those pictures. Neither the buffer setting nor these
 finite tests guarantee that every possible source fits the limit.
 
+## Desktop Duplication color metadata
+
+The `--capture ddagrab` fallback converts BGRA pixels to NV12 with the CPU
+`scale` filter. Tests with FFmpeg `0893feba65` show that its default conversion
+uses BT.601 coefficients but can leave the H.264 color matrix unspecified.
+A fully tagged RGB input instead retains an incorrect RGB matrix label.
+Either result leaves the receiver without an accurate description of the YUV
+conversion. A receiver that assumes BT.709 can display shifted colors.
+
+The filter explicitly sets `out_color_matrix=bt601`. The
+[FFmpeg scale implementation](https://github.com/FFmpeg/FFmpeg/blob/0893feba65/libavfilter/vf_scale.c#L1006-L1013)
+maps this value to `bt470bg`, while retaining the input's BT.709 primaries and sRGB
+transfer function. The matrix describes the RGB-to-YUV conversion, not the
+display primaries or transfer function. Color range remains unchanged.
+
+The [color check](../../tools/research/check_fallback_color.py) generates eight
+RGB swatches at 1920x1080, 2560x1600, and 3840x2160. It tests inferred limited
+range and explicitly tagged full range at 60 and 100 fps. Across 24 encodes,
+all 1,440 pictures decode at 1080p with no B frames and fit the 56,000-byte limit.
+Swatch samples match BT.601 coefficients within one code value. Converted NV12
+pixels and encoded H.264 picture data match byte for byte before and after
+the change. Only the color metadata changes.
+
+A separate Desktop Duplication check captures a 2x2-pixel corner region.
+The original stream has an unspecified matrix; the corrected stream declares
+`bt470bg`. Both retain limited range, BT.709 primaries, and the sRGB transfer
+function. The change adds no processing stage or frame queue. These checks
+do not measure headset color rendering or end-to-end latency.
+
+To reproduce the synthetic checks without screen capture or USB, run:
+
+```powershell
+python tools/research/check_fallback_color.py --output work/fallback-color
+```
+
+FFmpeg needs NVENC support and an `ffprobe` executable in the same directory.
+Use `--ffmpeg` to select the executable and choose a new output directory for
+each run. The tool saves generated clips, commands, the FFmpeg hash, decoded
+frame counts, color tags, and sample values.
+
 ## Host timing
 
 These runs measured the encoder changes before the capture-pacing change
@@ -141,6 +188,81 @@ A real NVENC test injects an oversized picture at frame 50. The bridge restarts
 only the encoder and sends 200 pictures through one simulated USB session.
 All 200 pictures decode at 1080p and match the expected reference pictures byte for byte.
 This test does not measure goggles recovery or optical delay.
+
+## Windows capture ceiling
+
+Windows Graphics Capture uses a 1000 fps capture ceiling. The existing frame
+selector limits output to `--fps` before encoding. The encoder configuration,
+resize filter, and frame-size guard remain unchanged. macOS keeps its 240 fps
+capture ceiling, and an explicit `--capture-fps` value overrides the default.
+
+The ceiling controls the capture session's minimum update interval and
+FFmpeg's repeated-frame timing. For the implementation, see the
+[FFmpeg Graphics Capture source](https://github.com/FFmpeg/FFmpeg/blob/0893feba65/libavfilter/vsrc_gfxcapture_winrt.cpp).
+The comparison changes this ceiling from 240 to 1000 while keeping the
+bounded-credit selector and each run's encoder target fixed.
+
+Tests use an owned D3D11 window with a moving seeded texture and a timestamp
+protected by a checksum. A separate offscreen shader completes 60 workloads/s.
+Each source has two 900-picture runs per configuration in A-B-B-A order.
+The first 100 pictures are excluded from timing. The GPU is an RTX 5060 Laptop
+with driver 610.74 and FFmpeg `0893feba65`.
+
+The source and background workload maintain their requested rates in every
+measurement window. Recorded GPU clocks overlap within each comparison.
+At a 100 fps encoder target, the following ranges describe the two runs,
+not confidence intervals.
+Fresh-frame delay starts at source render submission and ends when the host
+receives the first encoded picture with that timestamp:
+
+| Source | Distinct fps, 240 to 1000 | Fresh median, 240 to 1000 | Fresh p95, 240 to 1000 |
+| --- | --- | --- | --- |
+| 1080p at 100 fps | 93.65-95.34 to 99.97-99.98 | 8.63-8.86 to 7.70-7.77 ms | 15.08-15.26 to 11.27-11.39 ms |
+| 1080p at 30 fps | 29.96-30.00 to 29.97-30.00 | 6.93-7.40 to 7.03-7.10 ms | 11.72-11.89 to 7.98-8.23 ms |
+| 2400x1500 at 144 fps | 91.04-93.06 to 99.91-99.92 | 8.19-8.27 to 7.89-7.91 ms | 12.30-13.00 to 11.20-11.25 ms |
+
+The 30 fps source retains its distinct frame rate, and median-delay ranges
+overlap. Time-weighted source age also improves in each group. Repeated
+pictures therefore do not account for the reported improvement. All 10,800
+pictures decode, all steady-state timestamp checks pass, and every picture
+fits the 56,000-byte limit. The largest picture is 52,826 bytes.
+
+A further 10,800-picture comparison matches source and output rates at 60,
+75, and 90 fps under the same paced GPU workload. These capture-only results
+precede the frame-size guard and exclude encoder recovery delays:
+
+| Source and output target | Distinct fps, 240 to 1000 | Fresh p95, 240 to 1000 |
+| --- | --- | --- |
+| 60 fps | 58.37-59.85 to 60.00 | 12.13-12.34 to 8.14-8.23 ms |
+| 75 fps | 71.53-71.93 to 74.69-75.00 | 11.97-12.33 to 8.96-8.99 ms |
+| 90 fps | 86.44-86.49 to 89.81-90.04 | 13.15-13.71 to 10.68-10.71 ms |
+
+At 60 and 75 fps, nine pictures exceed 56,000 bytes across both capture
+ceilings. The largest is 61,614 bytes. All 90 fps pictures fit. The bridge
+rejects oversized pictures and restarts the encoder, so these capture-only
+figures do not establish uninterrupted delivery at the lower rates.
+
+Eight additional runs pass real capture and NVENC output through the bridge
+engine, packetizer, and simulated USB at 60 and 75 fps. All four runs with
+the higher ceiling deliver their requested 900 pictures. With the previous
+ceiling, three runs deliver 900 and one stops at 604 after repeated oversized
+pictures. Each configuration produces four oversize events across its four
+runs. Every run uses one simulated USB session, and all 6,904 delivered
+pictures decode with FFmpeg's `-xerror` check. No oversized picture reaches
+the simulated endpoint. These finite checks verify guard and recovery behavior,
+not the probability of an interruption or goggles recovery.
+
+Higher capture rates can consume more CPU. In the scaled-source comparison,
+encoder-process CPU time rises from 1.45-1.47 to 1.67-1.84 seconds per
+900-picture run. Source and background-workload throughput stay stable in
+that test. This result does not establish unchanged application performance
+on every PC.
+
+The [per-run results](evidence/capture-ceiling.json) include source and
+workload rates, fresh-frame delay, time-weighted age, and GPU telemetry.
+These are direct-window host measurements with 1 ms source-timestamp
+resolution. They exclude physical USB, goggles decoding, and panel scanout.
+They do not establish headset frame rate or end-to-end latency.
 
 ## Capture timestamp jitter
 
@@ -245,6 +367,103 @@ python tools/research/check_frame_pacing.py --output work/frame-pacing.json
 
 Use `--ffmpeg` to select the executable. The results file records the
 commands, binary hash, frame counts, and duplicate counts for every case.
+
+## Picture sizes during refresh
+
+Forcing a single slice during gradual refresh can produce pictures that exceed
+the 56,000-byte receiver limit. Windows encoding allows multiple slices during
+refresh. Bitrate, VBV budget, preset, quarter-resolution multipass, and the
+frame-size guard stay unchanged.
+
+[NVIDIA documents slice-based refresh](https://docs.nvidia.com/video-technologies/video-codec-sdk/13.1/nvenc-video-encoder-api-prog-guide/index.html).
+In the recorded 600-picture motion comparison, the encoder used three slices
+in 62 pictures and two slices in two pictures. The other 536 pictures had one
+slice. Both modes declared three reference buffers, zero reordered pictures,
+and the same bitrate, VBV budget, and picture-timing output delay.
+
+A generated blank-to-detail transition reproduced the overflow without screen
+capture or USB. Each mode encoded 900 pictures. The following results use the
+same GPU, driver, and FFmpeg revision as the quality tests:
+
+| Output setting | Single-slice maximum | Single-slice oversized pictures | Multi-slice maximum | Multi-slice oversized pictures |
+| --- | ---: | ---: | ---: | ---: |
+| 75 fps | 59,521 bytes | 9 | 50,975 bytes | 0 |
+| 100 fps | 59,449 bytes | 4 | 42,800 bytes | 0 |
+
+An owned-window comparison also exercised the production bridge, packetization,
+and recovery logic with simulated USB. Each mode ran twice at every supported
+rate. The target was 900 delivered pictures at 60, 75, and 90 fps, and 1,800 at
+100 fps. Five of eight single-slice runs stopped after repeated oversized
+pictures. All eight multi-slice runs reached their target without an oversized
+picture or encoder restart. Every delivered picture decoded: 14,722 across
+both modes. These finite trials do not establish a general failure rate.
+
+The quality comparison covers motion, text, scene changes, movie footage, and
+fine detail at all four rates. All 19,500 pictures decoded and fit the size
+limit. Whole-sequence PSNR changes range from -0.078 to +0.020 dB. Individual
+refresh pictures have larger differences; the
+[recorded evidence](evidence/refresh-slices.json) includes their worst PSNR and
+SSIM changes. Decoded image fidelity changes are small and mixed. The benefit
+is fewer stream interruptions.
+
+Four alternating single/multi/multi/single trials measured host delay under a
+paced GPU workload. Single-slice medians were 6.717 and 6.675 ms; multi-slice
+medians were 6.224 and 6.574 ms. Corresponding 95th percentiles were
+9.172/11.308 and 8.223/9.907 ms. The source and workload maintained about
+100 and 60 fps. These measurements cover source rendering through encoded
+picture delivery to Python on one PC. Physical multi-slice display behavior
+and receiver latency remain unverified.
+
+A separate detailed-image startup fixture still exceeds the limit in both
+modes. The bridge retains its size guard and bounded restart policy.
+
+To reproduce the generated refresh test, run these commands:
+
+```powershell
+python tools/research/check_refresh_frames.py --output work/refresh-100 --fps 100
+python tools/research/check_refresh_frames.py --output work/refresh-75 --fps 75
+```
+
+The tool requires NVENC and accepts `--ffmpeg` for an executable outside PATH.
+It saves commands, hashes, picture sizes, and decoded-frame checksums in a new
+output directory. It verifies the initial blank frame and repeated detailed
+image before encoding, and reports a failure if multi-slice pictures exceed
+the limit on the tested configuration.
+
+## Recurring IDR pictures
+
+NVENC makes the group of pictures unbounded when gradual refresh is on. A
+1,000-picture encode at 100 fps with gradual refresh alone contained one IDR,
+at the start. A decoder that misses that picture has no later entry point.
+[Issue #27](https://github.com/Ammaar-Alam/goggles-bridge/issues/27) reports the
+resulting black screen. Goggles 2 on firmware 01.11.00.00 reproduced it: a
+30-second stream delivered 2,132 pictures without a USB error or an oversized
+picture, and the display stayed black. With recurring IDR pictures, the same
+goggles displayed the desktop.
+
+The encoder forces an IDR at every keyframe interval, three seconds by
+default. During the first interval, it forces one every tenth of a second of
+pictures. The schedule counts pictures, not time. FFmpeg 9.0 and earlier
+deliver a Windows Graphics Capture frame only when the screen changes, and the
+reported still-desktop streams sent 3.2 to 5.2 pictures per second. At that
+rate, 300 pictures take about a minute, and ten take two to three seconds.
+
+The following table shows the largest picture in generated 10-second to
+15-second encodes. No picture exceeded the 56,000-byte limit:
+
+| Source | 60 fps | 75 fps | 90 fps | 100 fps |
+| --- | ---: | ---: | ---: | ---: |
+| Moving test pattern | 51,156 bytes | 51,124 bytes | 49,157 bytes | 43,860 bytes |
+| Still desktop capture | 52,416 bytes | 52,283 bytes | 50,350 bytes | 45,100 bytes |
+
+The still noise image from the [refresh test](#picture-sizes-during-refresh)
+is a known exception. At 100 fps, the picture after each later IDR reached
+77,441 bytes, and the size guard restarts the encoder. A plain group of
+pictures without gradual refresh reached 77,617 bytes on the same source.
+Moving noise exceeds the limit with or without recurring IDR pictures.
+
+On the still desktop capture at 100 fps, SSIM is 0.9995 between IDR pictures,
+0.9921 at an IDR, and 0.9973 one picture later.
 
 ## Reproduce the quality comparison
 

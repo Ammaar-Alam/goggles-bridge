@@ -39,6 +39,8 @@ MAX_VBV_BITS = MAX_FRAME_BYTES * 8
 MAX_AMF_VBV_BITS = 160_000
 # Largest tested average frame, 40 Mbps at 100 fps
 MAX_AVERAGE_FRAME_BYTES = 50_000
+# seconds without a picture before the encoder restarts
+SILENT_SECONDS = 5
 
 
 def default_windows_encoder(system_root=None):
@@ -62,7 +64,7 @@ class BridgeSettings:
     fps: int = 100
     bitrate_mbps: int | None = None
     capture: str = 'gfxcapture'
-    capture_fps: int = 240
+    capture_fps: int | None = None
     display_index: int = 0
     show_cursor: bool = True
     preset: str = 'p1'
@@ -106,6 +108,8 @@ class BridgeSettings:
             limit = max(b for b in CHOICES['bitrate_mbps'] if b * 1_000_000 // (8 * self.fps) <= MAX_AVERAGE_FRAME_BYTES)
             raise ValueError(f'At {self.fps} fps, use at most {limit} Mbps. '
                              f'{self.bitrate_mbps} Mbps makes frames too large for the goggles')
+        if self.capture_fps is None:
+            object.__setattr__(self, 'capture_fps', 1000 if self.capture == 'gfxcapture' else 240)
         if type(self.capture_fps) is not int or not self.fps <= self.capture_fps <= 1000:
             raise ValueError('Capture ceiling must be between output fps and 1000')
         if type(self.display_index) is not int or self.display_index < 0:
@@ -124,8 +128,9 @@ def encoder_command(settings, frames=0):
                 + (['--frames', str(frames)] if frames else []))
     # More NVENC bitrate must not enlarge the previous 20 Mbps buffer budget
     vbv = min(min(bitrate, 20_000_000)*2//settings.fps, MAX_VBV_BITS) if settings.nvenc else bitrate*2//settings.fps
+    period = settings.fps*settings.keyframe_seconds
     rate = ['-b:v', str(bitrate), '-maxrate', str(bitrate), '-bufsize', str(vbv), '-bf', '0',
-            '-g', str(settings.fps*settings.keyframe_seconds), '-level:v', '4.2' if settings.fps == 60 else '5.1',
+            '-g', str(period), '-level:v', '4.2' if settings.fps == 60 else '5.1',
             '-flush_packets', '1']
     command = [str(Path(settings.ffmpeg).resolve()), '-hide_banner', '-nostdin', '-loglevel', 'info']
     if settings.capture == 'avfoundation':
@@ -163,7 +168,8 @@ def encoder_command(settings, frames=0):
                       f':draw_mouse={int(settings.show_cursor)}')
             command += ['-f', 'lavfi', '-i', source, '-vf',
                         f'hwdownload,format=bgra,scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease:'
-                        f'flags=fast_bilinear,pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2,format=nv12']
+                        f'flags=fast_bilinear:out_color_matrix=bt601,'
+                        f'pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2,format=nv12']
         if settings.encoder == 'amf':
             # Periodic IDRs, not intra refresh: with -intra_refresh_mb, AMF sends only the first IDR and
             # Goggles 2 (firmware 01.14) stayed black, though FFmpeg decodes that stream correctly
@@ -185,7 +191,13 @@ def encoder_command(settings, frames=0):
             command += ['-an', '-c:v', 'h264_nvenc', '-preset', settings.preset, '-tune', 'ull', '-rc', 'cbr',
                         '-zerolatency', '1', '-delay', '0', '-profile:v', settings.h264_profile, *rate,
                         '-aud', '1', '-forced-idr', '1',
-                        '-multipass', 'qres', '-intra-refresh', '1', '-single-slice-intra-refresh', '1']
+                        '-multipass', 'qres', '-intra-refresh', '1',
+                        # single-slice refresh can exceed the receiver's picture-size limit
+                        '-single-slice-intra-refresh', '0',
+                        # refresh alone sends one IDR, and goggles that miss it stay black. The first interval
+                        # repeats it often, because a still screen can deliver only a few frames a second
+                        '-force_key_frames',
+                        f'expr:not(mod(n,{period}))+lt(n,{period})*not(mod(n,{settings.fps//10}))']
             if settings.adaptive_quant:
                 command += ['-spatial-aq', '1', '-temporal-aq', '1']
         if settings.low_latency:
@@ -340,7 +352,9 @@ class BridgeEngine:
             def read_usb():
                 try:
                     while not local_stop.is_set():
-                        data = usb.read(timeout_ms=50)
+                        # the DJI driver aborts the endpoint on a read timeout and drops a reply that arrives
+                        # during the abort, so wait longer than the gap between the goggles' packets
+                        data = usb.read(timeout_ms=500)
                         if data:
                             incoming.put(data, timeout=.2)
                 except Exception as exc:
@@ -427,8 +441,13 @@ class BridgeEngine:
                         try:
                             completed_at, frame = frames.get(timeout=.002)
                         except queue.Empty:
-                            if time.perf_counter()-last_frame > 5:
-                                raise RuntimeError(f'No video from display. See {encoder_path}')
+                            if time.perf_counter()-last_frame > SILENT_SECONDS:
+                                if encoder_first_frame:
+                                    raise RuntimeError(f'No video from display. See {encoder_path}')
+                                # FFmpeg 9.0 sends no pictures on a still screen, and a new encoder starts with keyframes
+                                stop_encoder()
+                                start_encoder()
+                                self.emit('capture_restart')
                             continue
                         last_frame = time.perf_counter()
                         oversize = self.settings.nvenc and len(frame) > MAX_FRAME_BYTES
