@@ -73,10 +73,12 @@ def main():
                         help='Video bitrate (Windows default: 24 at 60 fps, 30 at 75 fps, otherwise 32; macOS: 20 Mbps)')
     parser.add_argument('--aq', dest='adaptive_quant', action='store_true',
                         help='Turn on NVENC adaptive quantization (Windows only)')
-    parser.add_argument('--capture', choices=('screencapturekit', 'avfoundation') if MAC else ('gfxcapture', 'ddagrab'),
+    parser.add_argument('--capture', choices=('screencapturekit', 'avfoundation') if MAC else
+                        ('gfxcapture', 'ddagrab', 'amfcapture'),
                         default=MAC_CAPTURE if MAC else BridgeSettings.capture,
                         help='Windows: Graphics Capture with GPU scaling, or Desktop Duplication with CPU scaling '
                              '(default: Desktop Duplication with AMF, otherwise Graphics Capture). '
+                             'amfcapture: AMD GPU-only capture with much less CPU, no mouse pointer. '
                              'macOS: ScreenCaptureKit on 12.3 and later, or AVFoundation through FFmpeg')
     parser.add_argument('--capture-fps', type=int, default=BridgeSettings.capture_fps,
                         help='Maximum capture rate (default: 1000 for Windows Graphics Capture, otherwise 240)')
