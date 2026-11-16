@@ -65,7 +65,7 @@ def main():
     parser.add_argument('--dll', type=Path,
                         help='Windows only: DJI x64 libusb0_device.dll (default: DJI_USB_DLL or the installed driver copy)')
     parser.add_argument('--ffmpeg', type=Path, default=os.environ.get('GOGGLES_FFMPEG') or find_program('ffmpeg'),
-                        help='FFmpeg executable with NVENC or VideoToolbox and the chosen capture (default: GOGGLES_FFMPEG or PATH)')
+                        help='FFmpeg executable with NVENC, AMF or VideoToolbox and the chosen capture (default: GOGGLES_FFMPEG or PATH)')
     parser.add_argument('--python-deps', type=Path, help='Optional directory containing PyUSB 1.3.1')
     parser.add_argument('--fps', type=int, choices=CHOICES['fps'], default=BridgeSettings.fps,
                         help='Target encoder frame rate (default: %(default)s)')
