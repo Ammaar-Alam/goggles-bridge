@@ -1,5 +1,4 @@
 """Desktop app backend: setup checks, saved options, and the stream engine behind the window."""
-import atexit
 import ctypes as C
 from dataclasses import fields
 from datetime import datetime
@@ -43,7 +42,6 @@ TESTED_BUILDS = {'DJI Goggles 2': {'Dec 24 2024': '01.11.00.00', 'Feb 26 2025': 
                                    'Aug 11 2026': '01.14.00.00'}}
 # every stream option the window can change
 OPTIONS = tuple(f.name for f in fields(BridgeSettings) if f.name not in ('dll', 'ffmpeg', 'capture_fps'))
-VIRTUAL_OPTIONS = dict(source='display', virtual_resolution='1080p')
 
 
 def data_dir():
@@ -147,28 +145,23 @@ class Desktop:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = None
-        self._installing_display = False
         self._state = dict(phase='idle', problem=None, stats=None, oversize=0, log=None)
         self._checks = (0, None)
         self._displays = []
         self._ffmpeg = find_ffmpeg()
-        self._options = {**default_options(), **(VIRTUAL_OPTIONS if WINDOWS else {})}
+        self._options = default_options()
         self._onboarded = False
         try:
             saved = json.loads(self._settings_path.read_text(encoding='utf-8'))
             self._onboarded = bool(saved.get('onboarded'))
-            self._settings(saved)
+            self._settings({**self._options, **{k: v for k, v in saved.items() if k in OPTIONS}})
         except (OSError, ValueError, TypeError, AttributeError):
             pass  # keep the defaults when nothing valid is saved
 
     def _settings(self, options):
         """Validate options and adopt them; the engine's own rules decide what is allowed."""
-        allowed = (*OPTIONS, *VIRTUAL_OPTIONS) if WINDOWS else OPTIONS
-        merged = {**self._options, **{k: v for k, v in options.items() if k in allowed}}
-        if WINDOWS and (merged['source'] not in ('display', 'virtual') or
-                        merged['virtual_resolution'] not in ('720p', '1080p')):
-            raise ValueError('Unsupported display source or virtual display resolution')
-        settings = BridgeSettings(find_dll(), self._ffmpeg, **{k: v for k, v in merged.items() if k in OPTIONS})
+        merged = {**self._options, **{k: v for k, v in options.items() if k in OPTIONS}}
+        settings = BridgeSettings(find_dll(), self._ffmpeg, **merged)
         self._options = merged
         return settings
 
@@ -196,11 +189,6 @@ class Desktop:
                           screen=dict(needed=MAC, ok=not MAC or screen_access()),
                           ffmpeg=dict(needed=needs_ffmpeg, ok=not needs_ffmpeg or bool(self._ffmpeg and self._ffmpeg.is_file())),
                           attached=goggles_attached())
-            if WINDOWS:
-                from .virtual_display.virtual_driver import status
-                virtual = status()
-                configured = virtual.pop('config_current')
-                result['virtual_display'] = dict(virtual, ok=virtual['owned'] and configured)
             self._checks = (time.monotonic(), result)
             if result['attached'] is False:
                 self._device = None
@@ -234,7 +222,6 @@ class Desktop:
                 self._options['display_index'] = next((d['index'] for d in self._displays if d['primary']), 0)
         return dict(app=dict(name=APP_NAME, version=__version__, platform=sys.platform, updatable=UPDATABLE),
                     checks=checks, displays=self._displays, options=dict(self._options),
-                    installing_display=self._installing_display,
                     choices=dict(fps=CHOICES['fps'], capture=CAPTURES, preset=CHOICES['preset'],
                                  keyframe_seconds=CHOICES['keyframe_seconds'], h264_profile=CHOICES['h264_profile'],
                                  usb_write_size=CHOICES['usb_write_size'], bitrates=self._bitrates()),
@@ -242,56 +229,11 @@ class Desktop:
 
     def set_options(self, options):
         """Adopt and save changed options. Returns the problem when the engine refuses them."""
-        with self._lock:
-            if self._running() or self._installing_display or self._updating:
-                return dict(error='Stop streaming or finish setup before changing settings')
-            try:
-                self._settings(options)
-            except (ValueError, TypeError) as exc:
-                return dict(error=str(exc))
-            self._save()
-            self._checks = (0, None)
-        return dict(ok=True)
-
-    def install_virtual_display(self, remove=False):
-        """Run a fixed driver operation through normal UAC, outside the UI thread."""
-        if not WINDOWS or type(remove) is not bool:
-            return dict(error='Virtual display setup is only available on Windows')
-        with self._lock:
-            if self._running() or self._installing_display or self._updating:
-                return dict(error='Stop streaming or finish the current driver setup first')
-            self._installing_display = True
-
-        def install():
-            try:
-                from .virtual_display.virtual_driver import VirtualInstaller
-                from .virtual_display.paths import install_folder
-                started = time.time()
-                process = VirtualInstaller(remove=remove)
-                while (code := process.poll()) is None:
-                    time.sleep(.2)
-                if code not in (0, 3010):
-                    message = f'Virtual display setup failed ({code}). See the driver setup log in Program Files/Goggles Bridge Display.'
-                    report = install_folder()/'display-install.json'
-                    try:
-                        if report.stat().st_mtime >= started:
-                            details = json.loads(report.read_text(encoding='utf-8'))
-                            if isinstance(details, dict) and details.get('success') is False and isinstance(details.get('error'), str):
-                                message = details['error']
-                    except (OSError, ValueError):
-                        pass
-                    raise RuntimeError(message)
-                if code == 3010:
-                    raise RuntimeError('Restart Windows, then run driver setup again to finish.')
-                with self._lock:
-                    self._state.update(phase='idle', problem=None)
-            except Exception as exc:
-                self._fail(str(exc))
-            finally:
-                self._checks = (0, None)
-                self._installing_display = False
-
-        threading.Thread(target=install, daemon=False).start()
+        try:
+            self._settings(options)
+        except (ValueError, TypeError) as exc:
+            return dict(error=str(exc))
+        self._save()
         return dict(ok=True)
 
     def finish_setup(self):
@@ -309,12 +251,9 @@ class Desktop:
         with self._lock:
             if self._thread and self._thread.is_alive():
                 return dict(ok=True)
-            if self._updating or self._installing_display:
+            if self._updating:
                 return dict(ok=False)  # the app is about to close
             checks = self._preflight()
-            if self._options.get('source') == 'virtual' and not checks.get('virtual_display', {}).get('ok'):
-                self._state.update(phase='error', problem=dict(code='virtual_display', message='Set up the virtual display driver first'))
-                return dict(ok=False)
             for name in ('driver', 'screen', 'ffmpeg'):
                 if not checks[name]['ok']:
                     self._state.update(phase='error', problem=dict(code=name, message=f'{name} not found'))
@@ -323,9 +262,7 @@ class Desktop:
             log = data_dir()/'logs'/f'{datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}.jsonl'
             self._stop.clear()
             self._state.update(phase='checking', problem=None, stats=None, oversize=0, log=str(log))
-            # A virtual stream must finish its layout cleanup on graceful app exit.
-            virtual = self._options.get('source') == 'virtual'
-            self._thread = threading.Thread(target=self._run, args=(settings, log, dict(self._options)), daemon=not virtual)
+            self._thread = threading.Thread(target=self._run, args=(settings, log), daemon=True)
             self._thread.start()
         return dict(ok=True)
 
@@ -337,15 +274,10 @@ class Desktop:
         with self._lock:
             self._state.update(phase='error', problem=dict(code=problem_code(message), message=message))
 
-    def _run(self, settings, log, options=None):
+    def _run(self, settings, log):
         try:
             if self._probe:
                 self._probe.join(5)  # the stream needs the USB interface to itself
-            if (options or self._options).get('source') == 'virtual':
-                from .virtual_display.capture import run
-                run(settings, options or self._options, log, self._stop, self._event,
-                    engine_factory=self._engine_factory, check=self._check)
-                return
             problem = self._check(settings)
             if problem:
                 with self._lock:
@@ -377,7 +309,7 @@ class Desktop:
                 state['stats'] = {k: row[k] for k in ('fps', 'send_ms_p95', 'frame_bytes_max')}
             elif event == 'oversize_frame':
                 state['oversize'] += 1
-            elif event in ('error', 'display_cleanup_error'):
+            elif event == 'error':
                 state.update(phase='error', problem=dict(code=problem_code(row['message']), message=row['message']))
 
     def diagnostics(self):
@@ -416,8 +348,8 @@ class Desktop:
     def install_update(self):
         """Download the release that check_update found, run its installer, and close the app so it can be replaced."""
         with self._lock:
-            if self._running() or self._installing_display:
-                return dict(error='To update, stop streaming and finish driver setup')
+            if self._running():
+                return dict(error='To update, stop streaming')
             self._updating = True
         try:
             installer = updates.download(self._update, data_dir()/'updates')
@@ -476,66 +408,7 @@ def tint_title_bar(window):
         pass  # cosmetic only
 
 
-def app_mutex_name():
-    """Use the account SID so setup and every Windows session share one identity."""
-    kernel = C.WinDLL('kernel32', use_last_error=True)
-    security = C.WinDLL('advapi32', use_last_error=True)
-    kernel.CloseHandle.argtypes = [C.c_void_p]
-    kernel.LocalFree.argtypes = [C.c_void_p]
-    security.OpenProcessToken.argtypes = [C.c_void_p, C.c_ulong, C.POINTER(C.c_void_p)]
-    security.GetTokenInformation.argtypes = [C.c_void_p, C.c_int, C.c_void_p, C.c_ulong, C.POINTER(C.c_ulong)]
-    security.ConvertSidToStringSidW.argtypes = [C.c_void_p, C.POINTER(C.c_void_p)]
-    token, text, size = C.c_void_p(), C.c_void_p(), C.c_ulong()
-    if not security.OpenProcessToken(C.c_void_p(-1), 8, C.byref(token)):  # current process, TOKEN_QUERY
-        raise C.WinError(C.get_last_error())
-    try:
-        user = C.create_string_buffer(128)  # TOKEN_USER and the maximum 68-byte SID.
-        if not security.GetTokenInformation(token, 1, user, len(user), C.byref(size)):
-            raise C.WinError(C.get_last_error())
-        if not security.ConvertSidToStringSidW(C.c_void_p.from_buffer(user), C.byref(text)):
-            raise C.WinError(C.get_last_error())
-        try:
-            return 'Global\\GogglesBridge.' + C.wstring_at(text)
-        finally:
-            kernel.LocalFree(text)
-    finally:
-        kernel.CloseHandle(token)
-
-
-def hold_app_lifetime():
-    """Register a live GUI while excluding uninstall, without limiting GUI instances."""
-    name = app_mutex_name()
-    kernel = C.WinDLL('kernel32', use_last_error=True)
-    kernel.CreateMutexW.argtypes = [C.c_void_p, C.c_int, C.c_wchar_p]
-    kernel.CreateMutexW.restype = C.c_void_p
-    kernel.WaitForSingleObject.argtypes = [C.c_void_p, C.c_ulong]
-    kernel.ReleaseMutex.argtypes = [C.c_void_p]
-    kernel.CloseHandle.argtypes = [C.c_void_p]
-    gate = kernel.CreateMutexW(None, False, name + '.Uninstall')
-    if not gate:
-        raise C.WinError(C.get_last_error())
-    acquired = False
-    try:
-        result = kernel.WaitForSingleObject(gate, 0)
-        if result == 258:
-            raise SystemExit('Goggles Bridge is being uninstalled. Try again after setup finishes.')
-        if result not in (0, 0x80):
-            raise C.WinError(C.get_last_error())
-        acquired = True
-        marker = kernel.CreateMutexW(None, False, name + '.Running')
-        if not marker:
-            raise C.WinError(C.get_last_error())
-        # Hold the marker until all background threads and the process exit.
-        atexit.register(kernel.CloseHandle, marker)
-    finally:
-        if acquired:
-            kernel.ReleaseMutex(gate)
-        kernel.CloseHandle(gate)
-
-
 def main():
-    if WINDOWS:
-        hold_app_lifetime()
     import webview
     api = Desktop()
     self_test = '--self-test' in sys.argv
@@ -557,14 +430,12 @@ def main():
 
     def check():
         # the packaged app passes when its window draws a status from the backend
-        try:
-            for _ in range(40):
-                time.sleep(.25)
-                if window.evaluate_js("document.getElementById('version')?.textContent"):
-                    drawn.append(True)
-                    break
-        finally:
-            window.destroy()
+        for _ in range(40):
+            time.sleep(.25)
+            if window.evaluate_js("document.getElementById('version').textContent"):
+                drawn.append(True)
+                break
+        window.destroy()
 
     webview.start(check if self_test else None)
     api.stop()

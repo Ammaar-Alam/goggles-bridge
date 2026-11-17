@@ -8,8 +8,6 @@
     screencapturekit: 'ScreenCaptureKit', avfoundation: 'AVFoundation',
   };
   const NAMES = {
-    source: { display: 'Display', virtual: 'Virtual Display' },
-    virtual_resolution: { '720p': '1280 × 720', '1080p': '1920 × 1080' },
     capture: CAPTURE,
     keyframe_seconds: { 1: '1 second', 3: '3 seconds' },
     h264_profile: { high: 'High', baseline: 'Baseline' },
@@ -17,11 +15,7 @@
     usb_write_size: { 16384: '16 KB', 2048: '2 KB' },
   };
   const BASIC = [
-    { key: 'source', label: 'Source', kind: 'select', windows: true,
-      info: 'Send an existing display, or create an independent desktop for this stream.' },
     { key: 'display_index', label: 'Display', kind: 'display' },
-    { key: 'virtual_resolution', label: 'Desktop resolution', kind: 'select', windows: true,
-      info: 'The virtual desktop size. A 720p desktop is enlarged to fill the 1080p picture sent to the goggles.' },
     { key: 'fps', label: 'Frame rate', kind: 'segment',
       info: 'Frames sent to the goggles each second. At the same bitrate, a higher frame rate leaves less data for each frame.' },
     { key: 'bitrate_mbps', label: 'Bitrate', kind: 'select',
@@ -62,7 +56,6 @@
     welcome: ['Your screen, in your goggles', 'Goggles Bridge sends this computer’s screen to DJI Goggles 2 or DJI Goggles Integra over a USB cable.'],
     driver: ['Install the DJI USB driver', 'Install DJI Assistant 2 (Consumer Drones Series). It includes the USB driver for the goggles.'],
     screen: ['Allow screen recording', 'Goggles Bridge needs permission to send this Mac’s screen. Turn it on in System Settings, and then reopen the app.'],
-    virtual: ['Virtual Display', 'Optional: give a simulator its own desktop. Driver installation and removal need Windows administrator approval.'],
     cable: ['Connect the goggles', 'Use a USB-A to USB-C data cable, with the USB-A end in this computer. Then power the goggles on.'],
     display: ['Choose a display', 'The goggles show one display. Select the one to send.'],
     flight: ['Open DJI Virtual Flight', 'On the goggles, go to More > DJI Virtual Flight. Then start streaming.'],
@@ -153,12 +146,6 @@
     if (!c.driver.ok) {
       [headline, subline, look] = ['Install the DJI USB driver', GUIDE.driver[1], 'driver'];
       action = { label: 'Get DJI Assistant 2', kind: 'start', run: () => api.open_link('driver') };
-    } else if (s.installing_display) {
-      [headline, subline, look] = ['Setting up the virtual display', 'Complete Windows authorization when prompted.', 'waiting'];
-      action = { label: 'Setting up', kind: 'start', disabled: true };
-    } else if (o.source === 'virtual' && !c.virtual_display?.ok) {
-      [headline, subline, look] = ['Set up Virtual Display', 'Open the setup guide to install or repair the virtual display driver.', 'driver'];
-      action = { label: 'Open setup guide', kind: 'start', run: () => openGuide('virtual') };
     } else if (!c.screen.ok) {
       [headline, subline, look] = [...GUIDE.screen, 'driver'];
       action = { label: 'Open Settings', kind: 'start', run: () => api.open_link('screen') };
@@ -173,7 +160,6 @@
     } else if (live) {
       [headline, look] = [`Streaming to ${s.device ? s.device.model : 'the goggles'}`, 'streaming'];
       subline = `1920 × 1080 at ${o.fps} fps and ${bitrate} Mbps.`;
-      if (o.source === 'virtual' && o.virtual_resolution === '720p') subline += ' Enlarged from a 1280 × 720 desktop.';
       action = { label: 'Stop', kind: 'stop', run: stop };
     } else if (active(s)) {
       [headline, subline] = BUSY[phase] || ['Starting', ''];
@@ -258,7 +244,6 @@
       }
       controls[row.key] = control;
       const node = el('div', { className: 'row' }, label, control);
-      node.dataset.option = row.key;
       if (row.windows) node.dataset.windows = '';
       target.append(node);
     }
@@ -309,10 +294,9 @@
       }));
     });
 
-    const locked = active(s) || s.installing_display;
+    const locked = active(s);
     $('#options').disabled = locked;
     $('#locked').hidden = !locked;
-    $('#locked').textContent = s.installing_display ? 'Driver setup is in progress.' : 'To change settings, stop streaming.';
     for (const node of $$('[data-windows]')) node.hidden = s.app.platform !== 'win32';
     once('display-row', s.displays.length, () => {
       const row = controls.display_index;
@@ -341,14 +325,6 @@
       fill(key, s.choices[key], NAMES[key], o[key]);
     }
     for (const key of ['show_cursor', 'adaptive_quant', 'low_latency']) $('input', controls[key]).checked = Boolean(o[key]);
-    const virtual = o.source === 'virtual';
-    if (s.app.platform === 'win32') {
-      fill('source', ['display', 'virtual'], NAMES.source, o.source || 'display');
-      fill('virtual_resolution', ['720p', '1080p'], NAMES.virtual_resolution, o.virtual_resolution || '1080p');
-    }
-    controls.display_index.closest('.row').hidden = virtual;
-    controls.virtual_resolution.closest('.row').hidden = !virtual;
-    controls.capture.closest('.row').hidden = s.app.platform !== 'win32' || virtual;
   }
 
   function render() {
@@ -363,14 +339,7 @@
   }
 
   const guideSteps = s => ['welcome', ...(s.checks.driver.needed ? ['driver'] : []), ...(s.checks.screen.needed ? ['screen'] : []), 'cable',
-    ...(s.options.source !== 'virtual' && s.displays.length > 1 ? ['display'] : []),
-    ...(s.app.platform === 'win32' ? ['virtual'] : []), 'flight', 'done'];
-
-  async function maintainDisplay(remove) {
-    const result = await api.install_virtual_display(remove);
-    if (result.error) toast(result.error);
-    await refresh();
-  }
+    ...(s.displays.length > 1 ? ['display'] : []), 'flight', 'done'];
 
   function go(step) {
     const change = () => { guide.step = step; renderGuide(); };
@@ -399,7 +368,6 @@
     if (s.phase === 'streaming') return 'done';
     if (!s.checks.driver.ok) return 'driver';
     if (!s.checks.screen.ok) return 'screen';
-    if (s.app.platform === 'win32' && (s.options.source === 'virtual' || s.checks.virtual_display?.owned || s.checks.virtual_display?.previous)) return 'virtual';
     return s.checks.attached === false ? 'cable' : 'flight';
   }
 
@@ -418,7 +386,7 @@
 
     // a detected step shows a check and waits for the user to continue
     let label = 'Continue', kind = 'start', run = next, disabled = false, status = '', state = '';
-    let look = { welcome: 'welcome', driver: 'driver', screen: 'driver', cable: 'unplugged', display: 'idle', virtual: 'driver', flight: 'idle', done: 'streaming' }[step];
+    let look = { welcome: 'welcome', driver: 'driver', screen: 'driver', cable: 'unplugged', display: 'idle', flight: 'idle', done: 'streaming' }[step];
     if (step === 'welcome') {
       label = 'Set up';
     } else if (step === 'driver') {
@@ -427,27 +395,6 @@
     } else if (step === 'screen') {
       if (s.checks.screen.ok) [status, state, look] = ['Screen recording allowed', 'done', 'unplugged'];
       else [label, run, status, state] = ['Open Settings', () => api.open_link('screen'), 'Waiting for permission', 'waiting'];
-    } else if (step === 'virtual') {
-      const driver = s.checks.virtual_display;
-      const conflict = driver?.installed && !driver?.owned;
-      if (s.installing_display) {
-        [label, disabled, status, state] = ['Setting up', true, 'Complete Windows authorization when prompted.', 'waiting'];
-      } else if (active(s)) {
-        [disabled, status] = [true, 'Stop streaming before changing the driver.'];
-      } else if (driver?.previous) {
-        status = 'This older display installation cannot be verified. Uninstall it with the original app or its Windows uninstall entry, then install again.';
-        if (s.options.source === 'virtual') [label, disabled] = ['Uninstall previous driver first', true];
-      } else if (conflict) {
-        status = 'An existing virtual display could not be verified as ours. Remove it with its original installer first.';
-        disabled = s.options.source === 'virtual';
-      } else if (driver?.ok) {
-        [status, state] = ['Virtual display driver ready', 'done'];
-      } else if (s.options.source === 'virtual' || driver?.owned) {
-        [label, run] = [driver?.owned ? 'Repair display driver' : 'Install display driver', () => maintainDisplay(false)];
-      } else {
-        status = 'Choose Virtual Display under Source to use an independent desktop.';
-      }
-      if (s.phase === 'error' && s.problem?.message) [status, state] = [s.problem.message, 'bad'];
     } else if (step === 'cable') {
       const d = s.device;
       if (s.checks.attached === true && d && d.tested === false) [status, state, look] = [`${d.model} connected. ${untested(d)}`, 'warn', 'idle'];
@@ -469,10 +416,6 @@
     } else if (step === 'done') {
       [label, run] = ['Done', closeGuide];
     }
-    const remove = $('#guide-remove-display');
-    remove.hidden = step !== 'virtual' || !s.checks.virtual_display?.owned || s.checks.virtual_display?.previous;
-    remove.disabled = active(s) || s.installing_display;
-    remove.onclick = () => maintainDisplay(true);
     $('.guide .scene').dataset.state = look;
     const button = $('#guide-action');
     button.textContent = label;

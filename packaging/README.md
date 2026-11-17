@@ -11,9 +11,7 @@ python -m pip install -r requirements-app.txt pyinstaller==6.22.3
 python packaging/build_windows.py
 ```
 
-The script writes the app folder to `dist/Goggles Bridge/` and the installer to `dist/GogglesBridge-VERSION-Setup.exe`. Inno Setup is required: it also builds the optional machine-wide display driver component, `dist/GogglesBridgeDisplay-Setup.exe`. Add its compiler (`ISCC.exe`) to PATH when installed outside the standard location.
-
-The build checks that its Python environment can import the app dependencies and pywebview's window API before downloading or packaging files. Use the same Python interpreter to install dependencies and build the app.
+The script writes the app folder to `dist/Goggles Bridge/` and the installer to `dist/GogglesBridge-VERSION-Setup.exe`. Without Inno Setup, it builds only the folder.
 
 The build downloads a pinned FFmpeg build and checks its SHA-256. That build repeats frames when the screen is still. FFmpeg 9.0 and earlier don't.
 
