@@ -61,6 +61,8 @@ To stream from Windows without installing Python or FFmpeg, use the Goggles Brid
 
 The app requires 64-bit Windows 10 or 11, an NVIDIA or AMD GPU, and the Microsoft Edge WebView2 Runtime, which Windows 11 includes.
 
+For an optional separate desktop on Windows, install [Virtual Display Driver (VDD)](https://github.com/VirtualDrivers/Virtual-Display-Driver/releases) and follow [Virtual display setup](docs/VIRTUAL-DISPLAY.md).
+
 On a Mac with Apple silicon and macOS 12.3 or later, download `GogglesBridge-VERSION.dmg` from [Releases](https://github.com/Ammaar-Alam/goggles-bridge/releases), and then drag Goggles Bridge to Applications. The setup guide asks for screen recording permission. Connect the goggles with a USB-A-to-USB-C cable.
 
 ![The Goggles Bridge window on a Mac, asking for screen recording permission. The numbers are simulated.](docs/images/app-window-mac.png)
